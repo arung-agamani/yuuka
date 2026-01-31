@@ -8,6 +8,7 @@ Provides functionality for:
 """
 
 import io
+import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Optional
@@ -23,6 +24,8 @@ from yuuka.db.repository import LedgerRepository
 
 # Use non-interactive backend for Discord bot
 matplotlib.use("Agg")
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -84,7 +87,11 @@ class RecapService:
         self.budget_repo = budget_repo
 
         # Set up seaborn style
-        sns.set_theme(style="darkgrid")
+        try:
+            sns.set_theme(style="darkgrid")
+            logger.info("RecapService initialized successfully")
+        except Exception as e:
+            logger.warning(f"Failed to set seaborn theme: {e}")
 
     def get_period_start(self, budget: BudgetConfig, for_date: date) -> date:
         """Calculate the start of the current pay period."""
@@ -291,266 +298,307 @@ class RecapService:
 
         Returns:
             BytesIO buffer containing the PNG image
-        """
-        # Prepare data
-        dates = [s.date for s in recap.daily_summaries]
 
-        if not dates:
-            # No data - create empty chart
-            fig, ax = plt.subplots(figsize=(10, 6))
-            ax.text(
-                0.5,
-                0.5,
-                "No transaction data available",
-                ha="center",
-                va="center",
-                fontsize=14,
+        Raises:
+            ValueError: If recap data is invalid
+        """
+        if not recap:
+            raise ValueError("recap cannot be None")
+
+        fig = None
+        try:
+            # Prepare data
+            dates = [s.date for s in recap.daily_summaries]
+
+            if not dates:
+                # No data - create empty chart
+                fig, ax = plt.subplots(figsize=(10, 6))
+                ax.text(
+                    0.5,
+                    0.5,
+                    "No transaction data available",
+                    ha="center",
+                    va="center",
+                    fontsize=14,
+                )
+                ax.set_xlim(0, 1)
+                ax.set_ylim(0, 1)
+                buf = io.BytesIO()
+                fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+                buf.seek(0)
+                plt.close(fig)
+                logger.debug("Generated empty burndown chart")
+                return buf
+
+            # Calculate running balance
+            running_balance = []
+            balance = recap.current_balance
+
+            # Work backwards from current balance
+            daily_nets = [s.net for s in recap.daily_summaries]
+            cumulative_net = sum(daily_nets)
+            starting_balance = balance - cumulative_net
+
+            current = starting_balance
+            for summary in recap.daily_summaries:
+                current += summary.net
+                running_balance.append(current)
+
+            # Create DataFrame
+            df = pd.DataFrame(
+                {
+                    "Date": dates,
+                    "Balance": running_balance,
+                    "Daily Spending": [s.outgoing for s in recap.daily_summaries],
+                    "Daily Income": [s.incoming for s in recap.daily_summaries],
+                }
             )
-            ax.set_xlim(0, 1)
-            ax.set_ylim(0, 1)
+
+            # Create figure with two subplots
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), height_ratios=[2, 1])
+
+            # Color palette
+            colors = {
+                "balance": "#2ecc71",  # Green
+                "forecast": "#e74c3c",  # Red
+                "ideal": "#3498db",  # Blue
+                "spending": "#e74c3c",  # Red
+                "income": "#2ecc71",  # Green
+                "danger_zone": "#ffcccc",  # Light red
+            }
+
+            # Plot 1: Balance burndown
+            ax1.fill_between(
+                df["Date"],
+                0,
+                df["Balance"],
+                alpha=0.3,
+                color=colors["balance"],
+                label="_nolegend_",
+            )
+            ax1.plot(
+                df["Date"],
+                df["Balance"],
+                color=colors["balance"],
+                linewidth=2.5,
+                marker="o",
+                markersize=4,
+                label="Actual Balance",
+            )
+
+            # Add forecast line if budget is configured
+            if budget and recap.forecast:
+                forecast_dates = []
+                forecast_balance = []
+
+                last_date = dates[-1]
+                last_balance = running_balance[-1]
+
+                for i in range(recap.forecast.days_until_payday + 1):
+                    forecast_date = last_date + timedelta(days=i)
+                    forecast_dates.append(forecast_date)
+                    forecast_balance.append(last_balance - (budget.daily_limit * i))
+
+                ax1.plot(
+                    forecast_dates,
+                    forecast_balance,
+                    color=colors["forecast"],
+                    linewidth=2,
+                    linestyle="--",
+                    marker="",
+                    label=f"Forecast (@ {budget.daily_limit:,.0f}/day)",
+                )
+
+                # Add ideal spending line
+                ideal_daily = last_balance / max(recap.forecast.days_until_payday, 1)
+                ideal_balance = [
+                    last_balance - (ideal_daily * i) for i in range(len(forecast_dates))
+                ]
+                ax1.plot(
+                    forecast_dates,
+                    ideal_balance,
+                    color=colors["ideal"],
+                    linewidth=1.5,
+                    linestyle=":",
+                    label=f"Ideal (@ {ideal_daily:,.0f}/day)",
+                )
+
+                # Shade danger zone (below zero)
+                ax1.axhline(y=0, color="red", linestyle="-", linewidth=1, alpha=0.7)
+                ax1.fill_between(
+                    forecast_dates,
+                    [min(min(forecast_balance), 0)] * len(forecast_dates),
+                    0,
+                    alpha=0.2,
+                    color=colors["danger_zone"],
+                    label="_nolegend_",
+                )
+
+            ax1.set_title("Balance Burndown Chart", fontsize=14, fontweight="bold")
+            ax1.set_xlabel("")
+            ax1.set_ylabel("Balance", fontsize=11)
+            ax1.legend(loc="upper right")
+            ax1.tick_params(axis="x", rotation=45)
+
+            # Format y-axis with thousands separator
+            ax1.yaxis.set_major_formatter(FuncFormatter(lambda x, p: f"{x:,.0f}"))
+
+            # Plot 2: Daily spending vs income
+            bar_width = 0.35
+            x = range(len(df))
+
+            ax2.bar(
+                [i - bar_width / 2 for i in x],
+                df["Daily Income"],
+                bar_width,
+                label="Income",
+                color=colors["income"],
+                alpha=0.8,
+            )
+            ax2.bar(
+                [i + bar_width / 2 for i in x],
+                df["Daily Spending"],
+                bar_width,
+                label="Spending",
+                color=colors["spending"],
+                alpha=0.8,
+            )
+
+            # Add daily limit line if configured
+            if budget:
+                ax2.axhline(
+                    y=budget.daily_limit,
+                    color=colors["ideal"],
+                    linestyle="--",
+                    linewidth=2,
+                    label=f"Daily Limit ({budget.daily_limit:,.0f})",
+                )
+
+            ax2.set_title("Daily Income vs Spending", fontsize=14, fontweight="bold")
+            ax2.set_xlabel("Date", fontsize=11)
+            ax2.set_ylabel("Amount", fontsize=11)
+            ax2.set_xticks(x)
+            ax2.set_xticklabels([d.strftime("%m/%d") for d in df["Date"]], rotation=45)
+            ax2.legend(loc="upper right")
+            ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, p: f"{x:,.0f}"))
+
+            # Adjust layout
+            plt.tight_layout()
+
+            # Save to buffer
             buf = io.BytesIO()
             fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
             buf.seek(0)
-            plt.close(fig)
+
+            logger.debug(f"Generated burndown chart for user {recap.user_id}")
             return buf
-
-        # Calculate running balance
-        running_balance = []
-        balance = recap.current_balance
-
-        # Work backwards from current balance
-        daily_nets = [s.net for s in recap.daily_summaries]
-        cumulative_net = sum(daily_nets)
-        starting_balance = balance - cumulative_net
-
-        current = starting_balance
-        for summary in recap.daily_summaries:
-            current += summary.net
-            running_balance.append(current)
-
-        # Create DataFrame
-        df = pd.DataFrame(
-            {
-                "Date": dates,
-                "Balance": running_balance,
-                "Daily Spending": [s.outgoing for s in recap.daily_summaries],
-                "Daily Income": [s.incoming for s in recap.daily_summaries],
-            }
-        )
-
-        # Create figure with two subplots
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), height_ratios=[2, 1])
-
-        # Color palette
-        colors = {
-            "balance": "#2ecc71",  # Green
-            "forecast": "#e74c3c",  # Red
-            "ideal": "#3498db",  # Blue
-            "spending": "#e74c3c",  # Red
-            "income": "#2ecc71",  # Green
-            "danger_zone": "#ffcccc",  # Light red
-        }
-
-        # Plot 1: Balance burndown
-        ax1.fill_between(
-            df["Date"],
-            0,
-            df["Balance"],
-            alpha=0.3,
-            color=colors["balance"],
-            label="_nolegend_",
-        )
-        ax1.plot(
-            df["Date"],
-            df["Balance"],
-            color=colors["balance"],
-            linewidth=2.5,
-            marker="o",
-            markersize=4,
-            label="Actual Balance",
-        )
-
-        # Add forecast line if budget is configured
-        if budget and recap.forecast:
-            forecast_dates = []
-            forecast_balance = []
-
-            last_date = dates[-1]
-            last_balance = running_balance[-1]
-
-            for i in range(recap.forecast.days_until_payday + 1):
-                forecast_date = last_date + timedelta(days=i)
-                forecast_dates.append(forecast_date)
-                forecast_balance.append(last_balance - (budget.daily_limit * i))
-
-            ax1.plot(
-                forecast_dates,
-                forecast_balance,
-                color=colors["forecast"],
-                linewidth=2,
-                linestyle="--",
-                marker="",
-                label=f"Forecast (@ {budget.daily_limit:,.0f}/day)",
-            )
-
-            # Add ideal spending line
-            ideal_daily = last_balance / max(recap.forecast.days_until_payday, 1)
-            ideal_balance = [
-                last_balance - (ideal_daily * i) for i in range(len(forecast_dates))
-            ]
-            ax1.plot(
-                forecast_dates,
-                ideal_balance,
-                color=colors["ideal"],
-                linewidth=1.5,
-                linestyle=":",
-                label=f"Ideal (@ {ideal_daily:,.0f}/day)",
-            )
-
-            # Shade danger zone (below zero)
-            ax1.axhline(y=0, color="red", linestyle="-", linewidth=1, alpha=0.7)
-            ax1.fill_between(
-                forecast_dates,
-                [min(min(forecast_balance), 0)] * len(forecast_dates),
-                0,
-                alpha=0.2,
-                color=colors["danger_zone"],
-                label="_nolegend_",
-            )
-
-        ax1.set_title("Balance Burndown Chart", fontsize=14, fontweight="bold")
-        ax1.set_xlabel("")
-        ax1.set_ylabel("Balance", fontsize=11)
-        ax1.legend(loc="upper right")
-        ax1.tick_params(axis="x", rotation=45)
-
-        # Format y-axis with thousands separator
-        ax1.yaxis.set_major_formatter(FuncFormatter(lambda x, p: f"{x:,.0f}"))
-
-        # Plot 2: Daily spending vs income
-        bar_width = 0.35
-        x = range(len(df))
-
-        ax2.bar(
-            [i - bar_width / 2 for i in x],
-            df["Daily Income"],
-            bar_width,
-            label="Income",
-            color=colors["income"],
-            alpha=0.8,
-        )
-        ax2.bar(
-            [i + bar_width / 2 for i in x],
-            df["Daily Spending"],
-            bar_width,
-            label="Spending",
-            color=colors["spending"],
-            alpha=0.8,
-        )
-
-        # Add daily limit line if configured
-        if budget:
-            ax2.axhline(
-                y=budget.daily_limit,
-                color=colors["ideal"],
-                linestyle="--",
-                linewidth=2,
-                label=f"Daily Limit ({budget.daily_limit:,.0f})",
-            )
-
-        ax2.set_title("Daily Income vs Spending", fontsize=14, fontweight="bold")
-        ax2.set_xlabel("Date", fontsize=11)
-        ax2.set_ylabel("Amount", fontsize=11)
-        ax2.set_xticks(x)
-        ax2.set_xticklabels([d.strftime("%m/%d") for d in df["Date"]], rotation=45)
-        ax2.legend(loc="upper right")
-        ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, p: f"{x:,.0f}"))
-
-        # Adjust layout
-        plt.tight_layout()
-
-        # Save to buffer
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-        buf.seek(0)
-        plt.close(fig)
-
-        return buf
+        except Exception as e:
+            logger.error(f"Error generating burndown chart: {e}", exc_info=True)
+            raise
+        finally:
+            # Always close the figure to free memory
+            if fig is not None:
+                plt.close(fig)
 
     def format_recap_message(self, recap: RecapReport) -> str:
-        """Format the recap report as a Discord message."""
-        lines = [
-            f"📅 **Daily Recap for {recap.report_date.strftime('%A, %B %d, %Y')}**",
-            "",
-        ]
+        """
+        Format the recap report as a Discord message.
 
-        # Today's summary
-        lines.append("**Today's Activity:**")
-        lines.append("```")
-        lines.append(f"📥 Income:    {recap.today_summary.incoming:>15,.0f}")
-        lines.append(f"📤 Spending:  {recap.today_summary.outgoing:>15,.0f}")
-        lines.append(f"📊 Net:       {recap.today_summary.net:>15,.0f}")
-        lines.append(f"📝 Transactions: {recap.today_summary.transaction_count}")
-        lines.append("```")
+        Args:
+            recap: The recap report to format
 
-        # Period summary
-        lines.append("")
-        lines.append(
-            f"**Period Summary** (since {recap.period_start.strftime('%b %d')}):"
-        )
-        lines.append("```")
-        lines.append(f"💸 Total Spent: {recap.period_spending:>15,.0f}")
-        lines.append(f"💰 Balance:     {recap.current_balance:>15,.0f}")
-        lines.append("```")
+        Returns:
+            Formatted message string
 
-        # Forecast section
-        if recap.forecast:
-            forecast = recap.forecast
-            lines.append("")
+        Raises:
+            ValueError: If recap is invalid
+        """
+        if not recap:
+            raise ValueError("recap cannot be None")
 
-            # Warning emoji based on level
-            if forecast.warning_level == "danger":
-                emoji = "🚨"
-                status = "DANGER"
-            elif forecast.warning_level == "warning":
-                emoji = "⚠️"
-                status = "WARNING"
-            else:
-                emoji = "✅"
-                status = "SAFE"
+        try:
+            lines = [
+                f"📅 **Daily Recap for {recap.report_date.strftime('%A, %B %d, %Y')}**",
+                "",
+            ]
 
-            lines.append(f"**Forecast** {emoji} {status}")
+            # Today's summary
+            lines.append("**Today's Activity:**")
             lines.append("```")
-            lines.append(f"Days until payday:     {forecast.days_until_payday:>10}")
-            lines.append(f"Daily limit:           {forecast.daily_limit:>10,.0f}")
+            lines.append(f"📥 Income:    {recap.today_summary.incoming:>15,.0f}")
+            lines.append(f"📤 Spending:  {recap.today_summary.outgoing:>15,.0f}")
+            lines.append(f"📊 Net:       {recap.today_summary.net:>15,.0f}")
+            lines.append(f"📝 Transactions: {recap.today_summary.transaction_count}")
+            lines.append("```")
+
+            # Period summary
+            lines.append("")
             lines.append(
-                f"Projected at payday:   {forecast.projected_balance_at_payday:>10,.0f}"
+                f"**Period Summary** (since {recap.period_start.strftime('%b %d')}):"
             )
             lines.append("```")
+            lines.append(f"💸 Total Spent: {recap.period_spending:>15,.0f}")
+            lines.append(f"💰 Balance:     {recap.current_balance:>15,.0f}")
+            lines.append("```")
 
-            if forecast.is_at_risk:
+            # Forecast section
+            if recap.forecast:
+                forecast = recap.forecast
                 lines.append("")
-                lines.append("⚠️ **Risk Alert:**")
-                if forecast.days_until_red is not None and forecast.days_until_red > 0:
-                    days_before = forecast.days_until_payday - forecast.days_until_red
-                    lines.append(
-                        f"At your current daily limit, you'll run out of money "
-                        f"in **{forecast.days_until_red} days** "
-                        f"({days_before} days before payday)."
-                    )
-                elif forecast.days_until_red == 0:
-                    lines.append("⚠️ You're already in the red!")
 
-                lines.append("")
-                lines.append("💡 **Recommendations:**")
-                rec_limit = f"{forecast.recommended_daily_limit:,.0f}"
+                # Warning emoji based on level
+                if forecast.warning_level == "danger":
+                    emoji = "🚨"
+                    status = "DANGER"
+                elif forecast.warning_level == "warning":
+                    emoji = "⚠️"
+                    status = "WARNING"
+                else:
+                    emoji = "✅"
+                    status = "SAFE"
+
+                lines.append(f"**Forecast** {emoji} {status}")
+                lines.append("```")
+                lines.append(f"Days until payday:     {forecast.days_until_payday:>10}")
+                lines.append(f"Daily limit:           {forecast.daily_limit:>10,.0f}")
                 lines.append(
-                    f"• Reduce daily spending to **{rec_limit}** to make it to payday"
+                    f"Projected at payday:   {forecast.projected_balance_at_payday:>10,.0f}"
                 )
-                if forecast.savings_needed > 0:
-                    lines.append(
-                        f"• Or find an additional **{forecast.savings_needed:,.0f}** "
-                        f"to maintain current spending"
-                    )
+                lines.append("```")
 
-        return "\n".join(lines)
+                if forecast.is_at_risk:
+                    lines.append("")
+                    lines.append("⚠️ **Risk Alert:**")
+                    if (
+                        forecast.days_until_red is not None
+                        and forecast.days_until_red > 0
+                    ):
+                        days_before = (
+                            forecast.days_until_payday - forecast.days_until_red
+                        )
+                        lines.append(
+                            f"At your current daily limit, you'll run out of money "
+                            f"in **{forecast.days_until_red} days** "
+                            f"({days_before} days before payday)."
+                        )
+                    elif forecast.days_until_red == 0:
+                        lines.append("⚠️ You're already in the red!")
+
+                    lines.append("")
+                    lines.append("💡 **Recommendations:**")
+                    rec_limit = f"{forecast.recommended_daily_limit:,.0f}"
+                    lines.append(
+                        f"• Reduce daily spending to **{rec_limit}** to make it to payday"
+                    )
+                    if forecast.savings_needed > 0:
+                        lines.append(
+                            f"• Or find an additional **{forecast.savings_needed:,.0f}** "
+                            f"to maintain current spending"
+                        )
+
+            message = "\n".join(lines)
+            logger.debug(f"Formatted recap message for user {recap.user_id}")
+            return message
+        except Exception as e:
+            logger.error(f"Error formatting recap message: {e}", exc_info=True)
+            raise

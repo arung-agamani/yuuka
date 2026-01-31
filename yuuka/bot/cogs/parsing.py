@@ -5,6 +5,7 @@ Handles the /parse command and on_message event for natural language
 transaction parsing.
 """
 
+import logging
 from typing import Optional
 
 import discord
@@ -14,6 +15,8 @@ from discord.ext import commands
 from yuuka.db import LedgerRepository
 from yuuka.models import ParsedTransaction, TransactionAction
 from yuuka.services import TransactionNLPService
+
+logger = logging.getLogger(__name__)
 
 # Confidence threshold below which we ask for user confirmation
 LOW_CONFIDENCE_THRESHOLD = 0.7
@@ -80,43 +83,58 @@ class TransactionView(discord.ui.View):
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
         """Handle confirmation that the parse is correct."""
-        self.confirmed = True
+        try:
+            self.confirmed = True
 
-        # Save to database
-        entry = self.repository.insert(
-            parsed=self.parsed,
-            user_id=self.user_id,
-            channel_id=self.channel_id,
-            message_id=self.message_id,
-            guild_id=self.guild_id,
-            confirmed=True,
-        )
+            # Save to database
+            entry = self.repository.insert(
+                parsed=self.parsed,
+                user_id=self.user_id,
+                channel_id=self.channel_id,
+                message_id=self.message_id,
+                guild_id=self.guild_id,
+                confirmed=True,
+            )
 
-        content = (
-            f"✅ Confirmed! Transaction recorded (ID: `{entry.id}`):\n"
-            f"{format_transaction(self.parsed)}"
-        )
-        await interaction.response.edit_message(content=content, view=None)
-        self.stop()
+            content = (
+                f"✅ Confirmed! Transaction recorded (ID: `{entry.id}`):\n"
+                f"{format_transaction(self.parsed)}"
+            )
+            await interaction.response.edit_message(content=content, view=None)
+            logger.info(f"User {self.user_id} confirmed transaction {entry.id}")
+            self.stop()
+        except Exception as e:
+            logger.error(f"Error in confirm_button: {e}", exc_info=True)
+            await interaction.response.edit_message(
+                content="❌ An error occurred while saving your transaction. Please try again with `/parse`.",
+                view=None,
+            )
+            self.stop()
 
     @discord.ui.button(label="✗ Incorrect", style=discord.ButtonStyle.danger)
     async def reject_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
         """Handle rejection - parse was incorrect."""
-        self.confirmed = False
-        await interaction.response.edit_message(
-            content=(
-                "❌ Got it, transaction cancelled.\n"
-                "Please try rephrasing your transaction message."
-            ),
-            view=None,
-        )
-        self.stop()
+        try:
+            self.confirmed = False
+            await interaction.response.edit_message(
+                content=(
+                    "❌ Got it, transaction cancelled.\n"
+                    "Please try rephrasing your transaction message."
+                ),
+                view=None,
+            )
+            logger.info(f"User {self.user_id} rejected transaction parse")
+            self.stop()
+        except Exception as e:
+            logger.error(f"Error in reject_button: {e}", exc_info=True)
+            self.stop()
 
     async def on_timeout(self):
         """Called when the view times out."""
         self.confirmed = None
+        logger.info(f"Transaction confirmation timed out for user {self.user_id}")
 
 
 class ParsingCog(commands.Cog):
@@ -136,132 +154,203 @@ class ParsingCog(commands.Cog):
     @app_commands.describe(message="The transaction message to parse")
     async def parse_command(self, interaction: discord.Interaction, message: str):
         """Slash command to parse a transaction message."""
-        parsed = self.nlp_service.parse(message)
+        try:
+            # Validate input
+            if not message or not message.strip():
+                await interaction.response.send_message(
+                    "❌ Please provide a transaction message to parse.",
+                    ephemeral=True,
+                )
+                return
 
-        if not parsed.is_valid():
+            # Limit message length to prevent abuse
+            if len(message) > 500:
+                await interaction.response.send_message(
+                    "❌ Transaction message is too long (max 500 characters).",
+                    ephemeral=True,
+                )
+                return
+
+            parsed = self.nlp_service.parse(message)
+
+            if not parsed.is_valid():
+                await interaction.response.send_message(
+                    f"❓ I couldn't parse a valid transaction from your message:\n"
+                    f"```{message}```\n"
+                    "Please make sure to include an amount and source/destination.",
+                    ephemeral=True,
+                )
+                logger.info(
+                    f"Invalid transaction parse for user {interaction.user.id}: {message}"
+                )
+                return
+
+            user_id = str(interaction.user.id)
+            channel_id = str(interaction.channel_id)
+            guild_id = str(interaction.guild_id) if interaction.guild_id else None
+
+            if parsed.confidence < LOW_CONFIDENCE_THRESHOLD:
+                # Send first to get message ID
+                await interaction.response.send_message(
+                    format_low_confidence_message(parsed),
+                )
+                response = await interaction.original_response()
+                message_id = str(response.id)
+
+                view = TransactionView(
+                    parsed=parsed,
+                    original_message=message,
+                    repository=self.repository,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    message_id=message_id,
+                    guild_id=guild_id,
+                )
+                await interaction.edit_original_response(view=view)
+                logger.info(
+                    f"Low confidence parse for user {user_id}, awaiting confirmation"
+                )
+            else:
+                # High confidence - save directly
+                await interaction.response.send_message("Processing...")
+                response = await interaction.original_response()
+                message_id = str(response.id)
+
+                entry = self.repository.insert(
+                    parsed=parsed,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    message_id=message_id,
+                    guild_id=guild_id,
+                    confirmed=True,
+                )
+
+                await interaction.edit_original_response(
+                    content=(
+                        f"✅ Transaction recorded (ID: `{entry.id}`):\n"
+                        f"{format_transaction(parsed)}"
+                    )
+                )
+                logger.info(f"Transaction {entry.id} recorded for user {user_id}")
+        except ValueError as e:
+            logger.warning(f"Validation error in parse_command: {e}")
             await interaction.response.send_message(
-                f"❓ I couldn't parse a valid transaction from your message:\n"
-                f"```{message}```\n"
-                "Please make sure to include an amount and source/destination.",
+                f"❌ Invalid input: {str(e)}",
                 ephemeral=True,
             )
-            return
-
-        user_id = str(interaction.user.id)
-        channel_id = str(interaction.channel_id)
-        guild_id = str(interaction.guild_id) if interaction.guild_id else None
-
-        if parsed.confidence < LOW_CONFIDENCE_THRESHOLD:
-            # Send first to get message ID
-            await interaction.response.send_message(
-                format_low_confidence_message(parsed),
-            )
-            response = await interaction.original_response()
-            message_id = str(response.id)
-
-            view = TransactionView(
-                parsed=parsed,
-                original_message=message,
-                repository=self.repository,
-                user_id=user_id,
-                channel_id=channel_id,
-                message_id=message_id,
-                guild_id=guild_id,
-            )
-            await interaction.edit_original_response(view=view)
-        else:
-            # High confidence - save directly
-            await interaction.response.send_message("Processing...")
-            response = await interaction.original_response()
-            message_id = str(response.id)
-
-            entry = self.repository.insert(
-                parsed=parsed,
-                user_id=user_id,
-                channel_id=channel_id,
-                message_id=message_id,
-                guild_id=guild_id,
-                confirmed=True,
-            )
-
-            await interaction.edit_original_response(
-                content=(
-                    f"✅ Transaction recorded (ID: `{entry.id}`):\n"
-                    f"{format_transaction(parsed)}"
-                )
-            )
+        except Exception as e:
+            logger.error(f"Error in parse_command: {e}", exc_info=True)
+            error_msg = "❌ An error occurred while processing your transaction. Please try again."
+            if interaction.response.is_done():
+                await interaction.followup.send(error_msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(error_msg, ephemeral=True)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         """Handle regular messages for transaction parsing."""
-        # Ignore messages from the bot itself
-        if message.author == self.bot.user:
-            return
+        try:
+            # Ignore messages from the bot itself
+            if message.author == self.bot.user:
+                return
 
-        # Ensure bot.user is available
-        if self.bot.user is None:
-            return
+            # Ignore bot messages
+            if message.author.bot:
+                return
 
-        # Check if this is a DM or if the bot is mentioned
-        is_dm = isinstance(message.channel, discord.DMChannel)
-        is_mentioned = self.bot.user in message.mentions
+            # Ensure bot.user is available
+            if self.bot.user is None:
+                return
 
-        # In DMs, process all messages; in channels, require mention
-        if not is_dm and not is_mentioned:
-            return
+            # Check if this is a DM or if the bot is mentioned
+            is_dm = isinstance(message.channel, discord.DMChannel)
+            is_mentioned = self.bot.user in message.mentions
 
-        # Remove the bot mention from the message if present
-        content = message.content
-        if is_mentioned:
-            content = content.replace(f"<@{self.bot.user.id}>", "").strip()
+            # In DMs, process all messages; in channels, require mention
+            if not is_dm and not is_mentioned:
+                return
 
-        if not content:
-            return
+            # Remove the bot mention from the message if present
+            content = message.content
+            if is_mentioned:
+                content = content.replace(f"<@{self.bot.user.id}>", "").strip()
 
-        parsed = self.nlp_service.parse(content)
+            if not content or not content.strip():
+                return
 
-        if not parsed.is_valid():
-            await message.reply(
-                "❓ I couldn't parse a valid transaction from your message.\n"
-                "Please make sure to include an amount and source/destination.\n"
-                "Use `/help` for examples."
-            )
-            return
+            # Limit message length to prevent abuse
+            if len(content) > 500:
+                await message.reply(
+                    "❌ Transaction message is too long (max 500 characters)."
+                )
+                return
 
-        user_id = str(message.author.id)
-        channel_id = str(message.channel.id)
-        message_id = str(message.id)
-        guild_id = str(message.guild.id) if message.guild else None
+            parsed = self.nlp_service.parse(content)
 
-        if parsed.confidence < LOW_CONFIDENCE_THRESHOLD:
-            view = TransactionView(
-                parsed=parsed,
-                original_message=content,
-                repository=self.repository,
-                user_id=user_id,
-                channel_id=channel_id,
-                message_id=message_id,
-                guild_id=guild_id,
-            )
-            await message.reply(
-                format_low_confidence_message(parsed),
-                view=view,
-            )
-        else:
-            # High confidence - save directly
-            entry = self.repository.insert(
-                parsed=parsed,
-                user_id=user_id,
-                channel_id=channel_id,
-                message_id=message_id,
-                guild_id=guild_id,
-                confirmed=True,
-            )
+            if not parsed.is_valid():
+                await message.reply(
+                    "❓ I couldn't parse a valid transaction from your message.\n"
+                    "Please make sure to include an amount and source/destination.\n"
+                    "Use `/help` for examples."
+                )
+                logger.info(
+                    f"Invalid transaction parse from user {message.author.id}: {content}"
+                )
+                return
 
-            await message.reply(
-                f"✅ Transaction recorded (ID: `{entry.id}`):\n"
-                f"{format_transaction(parsed)}"
-            )
+            user_id = str(message.author.id)
+            channel_id = str(message.channel.id)
+            message_id = str(message.id)
+            guild_id = str(message.guild.id) if message.guild else None
+
+            if parsed.confidence < LOW_CONFIDENCE_THRESHOLD:
+                view = TransactionView(
+                    parsed=parsed,
+                    original_message=content,
+                    repository=self.repository,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    message_id=message_id,
+                    guild_id=guild_id,
+                )
+                await message.reply(
+                    format_low_confidence_message(parsed),
+                    view=view,
+                )
+                logger.info(
+                    f"Low confidence parse from user {user_id}, awaiting confirmation"
+                )
+            else:
+                # High confidence - save directly
+                entry = self.repository.insert(
+                    parsed=parsed,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    message_id=message_id,
+                    guild_id=guild_id,
+                    confirmed=True,
+                )
+
+                await message.reply(
+                    f"✅ Transaction recorded (ID: `{entry.id}`):\n"
+                    f"{format_transaction(parsed)}"
+                )
+                logger.info(f"Transaction {entry.id} recorded from user {user_id}")
+        except ValueError as e:
+            logger.warning(f"Validation error in on_message: {e}")
+            await message.reply(f"❌ Invalid input: {str(e)}")
+        except discord.HTTPException as e:
+            logger.error(f"Discord API error in on_message: {e}", exc_info=True)
+            # Don't reply if we can't send messages
+        except Exception as e:
+            logger.error(f"Error in on_message: {e}", exc_info=True)
+            try:
+                await message.reply(
+                    "❌ An error occurred while processing your transaction. Please try again."
+                )
+            except Exception:
+                # If we can't even send an error message, just log it
+                logger.error("Could not send error message to user")
 
 
 async def setup(bot: commands.Bot):

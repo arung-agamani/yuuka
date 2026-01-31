@@ -4,6 +4,7 @@ Budget Cog for budget configuration and financial forecasting.
 Handles the /budget and /forecast commands.
 """
 
+import logging
 from datetime import date
 from typing import Optional
 
@@ -13,6 +14,8 @@ from discord.ext import commands
 
 from yuuka.db import BudgetRepository, LedgerRepository
 from yuuka.services.recap import RecapService
+
+logger = logging.getLogger(__name__)
 
 
 class BudgetCog(commands.Cog):
@@ -44,131 +47,184 @@ class BudgetCog(commands.Cog):
         monthly_income: Optional[float] = None,
     ):
         """Configure budget settings for forecasting."""
-        user_id = str(interaction.user.id)
+        try:
+            user_id = str(interaction.user.id)
 
-        # Validate payday
-        if payday is not None and (payday < 1 or payday > 31):
-            await interaction.response.send_message(
-                "❌ Payday must be between 1 and 31.",
-                ephemeral=True,
-            )
-            return
-
-        # If no arguments, show current config
-        if daily_limit is None and payday is None and monthly_income is None:
-            config = self.budget_repo.get_by_user(user_id)
-            if config:
-                monthly_inc_str = (
-                    f"{config.monthly_income:,.0f}"
-                    if config.monthly_income
-                    else "Not set"
-                )
-                lines = [
-                    "⚙️ **Your Budget Configuration**",
-                    "```",
-                    f"Daily Limit:     {config.daily_limit:>15,.0f}",
-                    f"Payday:          {config.payday:>15} (day of month)",
-                    f"Monthly Income:  {monthly_inc_str:>15}",
-                    f"Warning at:      {config.warning_threshold * 100:>14.0f}%",
-                    "```",
-                    "",
-                    f"Days until payday: **{config.days_until_payday()}**",
-                ]
+            # Validate inputs
+            if daily_limit is not None and daily_limit < 0:
                 await interaction.response.send_message(
-                    "\n".join(lines), ephemeral=True
-                )
-            else:
-                await interaction.response.send_message(
-                    "📭 No budget configured yet.\n"
-                    "Use `/budget daily_limit:<amount> payday:<day>` to set up.",
+                    "❌ Daily limit must be a positive number.",
                     ephemeral=True,
                 )
-            return
+                return
 
-        # Update/create config
-        config = self.budget_repo.upsert(
-            user_id=user_id,
-            daily_limit=daily_limit,
-            payday=payday,
-            monthly_income=monthly_income,
-        )
+            if payday is not None and (payday < 1 or payday > 31):
+                await interaction.response.send_message(
+                    "❌ Payday must be between 1 and 31.",
+                    ephemeral=True,
+                )
+                return
 
-        await interaction.response.send_message(
-            f"✅ Budget updated!\n"
-            f"• Daily limit: **{config.daily_limit:,.0f}**\n"
-            f"• Payday: **{config.payday}** (day of month)\n"
-            f"• Days until payday: **{config.days_until_payday()}**",
-            ephemeral=True,
-        )
+            if monthly_income is not None and monthly_income < 0:
+                await interaction.response.send_message(
+                    "❌ Monthly income must be a positive number.",
+                    ephemeral=True,
+                )
+                return
+
+            # If no arguments, show current config
+            if daily_limit is None and payday is None and monthly_income is None:
+                config = self.budget_repo.get_by_user(user_id)
+                if config:
+                    monthly_inc_str = (
+                        f"{config.monthly_income:,.0f}"
+                        if config.monthly_income
+                        else "Not set"
+                    )
+                    lines = [
+                        "⚙️ **Your Budget Configuration**",
+                        "```",
+                        f"Daily Limit:     {config.daily_limit:>15,.0f}",
+                        f"Payday:          {config.payday:>15} (day of month)",
+                        f"Monthly Income:  {monthly_inc_str:>15}",
+                        f"Warning at:      {config.warning_threshold * 100:>14.0f}%",
+                        "```",
+                        "",
+                        f"Days until payday: **{config.days_until_payday()}**",
+                    ]
+                    await interaction.response.send_message(
+                        "\n".join(lines), ephemeral=True
+                    )
+                    logger.info(f"Showed budget config for user {user_id}")
+                else:
+                    await interaction.response.send_message(
+                        "📭 No budget configured yet.\n"
+                        "Use `/budget daily_limit:<amount> payday:<day>` to set up.",
+                        ephemeral=True,
+                    )
+                    logger.debug(f"No budget config found for user {user_id}")
+                return
+
+            # Update/create config
+            config = self.budget_repo.upsert(
+                user_id=user_id,
+                daily_limit=daily_limit,
+                payday=payday,
+                monthly_income=monthly_income,
+            )
+
+            await interaction.response.send_message(
+                f"✅ Budget updated!\n"
+                f"• Daily limit: **{config.daily_limit:,.0f}**\n"
+                f"• Payday: **{config.payday}** (day of month)\n"
+                f"• Days until payday: **{config.days_until_payday()}**",
+                ephemeral=True,
+            )
+            logger.info(f"Updated budget config for user {user_id}")
+        except ValueError as e:
+            logger.warning(f"Validation error in budget_command: {e}")
+            await interaction.response.send_message(
+                f"❌ Invalid input: {str(e)}",
+                ephemeral=True,
+            )
+        except Exception as e:
+            logger.error(f"Error in budget_command: {e}", exc_info=True)
+            error_msg = (
+                "❌ An error occurred while updating your budget. Please try again."
+            )
+            if interaction.response.is_done():
+                await interaction.followup.send(error_msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(error_msg, ephemeral=True)
 
     @app_commands.command(name="forecast", description="See your financial forecast")
     async def forecast_command(self, interaction: discord.Interaction):
         """Show detailed financial forecast."""
-        user_id = str(interaction.user.id)
+        try:
+            user_id = str(interaction.user.id)
 
-        budget = self.budget_repo.get_by_user(user_id)
-        if not budget:
+            budget = self.budget_repo.get_by_user(user_id)
+            if not budget:
+                await interaction.response.send_message(
+                    "📭 No budget configured. Use `/budget` to set up your daily limit "
+                    "and payday first.",
+                    ephemeral=True,
+                )
+                logger.debug(
+                    f"No budget config for forecast request from user {user_id}"
+                )
+                return
+
+            current_balance = self.repository.get_total_balance(user_id)
+            forecast = self.recap_service.generate_forecast(
+                user_id, budget, current_balance, date.today()
+            )
+
+            # Format forecast message
+            if forecast.warning_level == "danger":
+                emoji = "🚨"
+                color_word = "RED ALERT"
+            elif forecast.warning_level == "warning":
+                emoji = "⚠️"
+                color_word = "WARNING"
+            else:
+                emoji = "✅"
+                color_word = "LOOKING GOOD"
+
+            lines = [
+                f"{emoji} **Financial Forecast: {color_word}**",
+                "",
+                "```",
+                f"Current Balance:       {forecast.current_balance:>15,.0f}",
+                f"Days until payday:     {forecast.days_until_payday:>15}",
+                f"Your daily limit:      {forecast.daily_limit:>15,.0f}",
+                "",
+                f"Projected at payday:   {forecast.projected_balance_at_payday:>15,.0f}",
+                "```",
+            ]
+
+            if forecast.is_at_risk:
+                lines.append("")
+                lines.append("🚨 **You're at risk of going into the red!**")
+                if forecast.days_until_red is not None:
+                    if forecast.days_until_red == 0:
+                        lines.append("• You're already in the red!")
+                    else:
+                        lines.append(
+                            f"• At current spending, you'll hit zero "
+                            f"in **{forecast.days_until_red} days**"
+                        )
+                lines.append("")
+                lines.append("💡 **To avoid going red:**")
+                rec_limit = f"{forecast.recommended_daily_limit:,.0f}"
+                lines.append(f"• Reduce daily spending to **{rec_limit}**")
+                if forecast.savings_needed > 0:
+                    lines.append(
+                        f"• Or add **{forecast.savings_needed:,.0f}** to your balance"
+                    )
+            else:
+                lines.append("")
+                lines.append("🎉 You're on track to make it to payday!")
+                buffer = forecast.projected_balance_at_payday
+                lines.append(f"You'll have **{buffer:,.0f}** remaining.")
+
+            await interaction.response.send_message("\n".join(lines), ephemeral=True)
+            logger.info(f"Showed forecast for user {user_id}: {forecast.warning_level}")
+        except ValueError as e:
+            logger.warning(f"Validation error in forecast_command: {e}")
             await interaction.response.send_message(
-                "📭 No budget configured. Use `/budget` to set up your daily limit "
-                "and payday first.",
+                f"❌ Invalid input: {str(e)}",
                 ephemeral=True,
             )
-            return
-
-        current_balance = self.repository.get_total_balance(user_id)
-        forecast = self.recap_service.generate_forecast(
-            user_id, budget, current_balance, date.today()
-        )
-
-        # Format forecast message
-        if forecast.warning_level == "danger":
-            emoji = "🚨"
-            color_word = "RED ALERT"
-        elif forecast.warning_level == "warning":
-            emoji = "⚠️"
-            color_word = "WARNING"
-        else:
-            emoji = "✅"
-            color_word = "LOOKING GOOD"
-
-        lines = [
-            f"{emoji} **Financial Forecast: {color_word}**",
-            "",
-            "```",
-            f"Current Balance:       {forecast.current_balance:>15,.0f}",
-            f"Days until payday:     {forecast.days_until_payday:>15}",
-            f"Your daily limit:      {forecast.daily_limit:>15,.0f}",
-            "",
-            f"Projected at payday:   {forecast.projected_balance_at_payday:>15,.0f}",
-            "```",
-        ]
-
-        if forecast.is_at_risk:
-            lines.append("")
-            lines.append("🚨 **You're at risk of going into the red!**")
-            if forecast.days_until_red is not None:
-                if forecast.days_until_red == 0:
-                    lines.append("• You're already in the red!")
-                else:
-                    lines.append(
-                        f"• At current spending, you'll hit zero "
-                        f"in **{forecast.days_until_red} days**"
-                    )
-            lines.append("")
-            lines.append("💡 **To avoid going red:**")
-            rec_limit = f"{forecast.recommended_daily_limit:,.0f}"
-            lines.append(f"• Reduce daily spending to **{rec_limit}**")
-            if forecast.savings_needed > 0:
-                lines.append(
-                    f"• Or add **{forecast.savings_needed:,.0f}** to your balance"
-                )
-        else:
-            lines.append("")
-            lines.append("🎉 You're on track to make it to payday!")
-            buffer = forecast.projected_balance_at_payday
-            lines.append(f"You'll have **{buffer:,.0f}** remaining.")
-
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+        except Exception as e:
+            logger.error(f"Error in forecast_command: {e}", exc_info=True)
+            error_msg = (
+                "❌ An error occurred while generating your forecast. Please try again."
+            )
+            if interaction.response.is_done():
+                await interaction.followup.send(error_msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(error_msg, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

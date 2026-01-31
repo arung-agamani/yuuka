@@ -1,3 +1,4 @@
+import logging
 import re
 from typing import Optional
 
@@ -6,6 +7,8 @@ from spacy.matcher import Matcher
 
 from ..models.transaction import ParsedTransaction, TransactionAction
 from .amount_parser import AmountParser
+
+logger = logging.getLogger(__name__)
 
 
 class TransactionNLPService:
@@ -39,8 +42,25 @@ class TransactionNLPService:
 
         Args:
             model_name: Name of the spaCy model to load
+
+        Raises:
+            RuntimeError: If the spaCy model is not installed
         """
-        self.nlp = spacy.load(model_name)
+        try:
+            self.nlp = spacy.load(model_name)
+            logger.info(f"Loaded spaCy model: {model_name}")
+        except OSError as e:
+            logger.error(
+                f"Failed to load spaCy model '{model_name}': {e}", exc_info=True
+            )
+            raise RuntimeError(
+                f"spaCy model '{model_name}' not found. "
+                f"Please install it with: python -m spacy download {model_name}"
+            ) from e
+        except Exception as e:
+            logger.error(f"Unexpected error loading spaCy model: {e}", exc_info=True)
+            raise
+
         self.matcher = Matcher(self.nlp.vocab)
         self._setup_patterns()
 
@@ -67,30 +87,76 @@ class TransactionNLPService:
 
         Returns:
             ParsedTransaction with extracted fields
+
+        Raises:
+            ValueError: If text is empty or invalid
         """
+        if not text or not isinstance(text, str):
+            raise ValueError(f"Invalid text input: {text}")
+
         text = text.strip()
-        text_lower = text.lower()
-        doc = self.nlp(text)
+        if not text:
+            raise ValueError("Text cannot be empty")
 
-        # Extract components
-        action = self._detect_action(text_lower, doc)
-        amount = self._extract_amount(text)
-        source = self._extract_source(text_lower, doc)
-        destination = self._extract_destination(text_lower, doc)
-        description = self._extract_description(text_lower, doc)
+        # Limit text length to prevent abuse
+        if len(text) > 500:
+            raise ValueError(f"Text too long (max 500 characters): {len(text)}")
 
-        # Calculate confidence based on how many fields were extracted
-        confidence = self._calculate_confidence(action, amount, source, destination)
+        try:
+            text_lower = text.lower()
+            doc = self.nlp(text)
+        except Exception as e:
+            logger.error(f"Error processing text with spaCy: {e}", exc_info=True)
+            # Return a low-confidence result rather than crashing
+            return ParsedTransaction(
+                action=TransactionAction.OUTGOING,
+                amount=None,
+                source=None,
+                destination=None,
+                description=None,
+                raw_text=text,
+                confidence=0.0,
+            )
 
-        return ParsedTransaction(
-            action=action,
-            amount=amount,
-            source=source,
-            destination=destination,
-            description=description,
-            raw_text=text,
-            confidence=confidence,
-        )
+        try:
+            # Extract components
+            action = self._detect_action(text_lower, doc)
+            amount = self._extract_amount(text)
+            source = self._extract_source(text_lower, doc)
+            destination = self._extract_destination(text_lower, doc)
+            description = self._extract_description(text_lower, doc)
+
+            # Calculate confidence based on how many fields were extracted
+            confidence = self._calculate_confidence(action, amount, source, destination)
+
+            result = ParsedTransaction(
+                action=action,
+                amount=amount,
+                source=source,
+                destination=destination,
+                description=description,
+                raw_text=text,
+                confidence=confidence,
+            )
+
+            logger.debug(
+                f"Parsed transaction: action={action.value}, amount={amount}, "
+                f"confidence={confidence:.2f}"
+            )
+
+            return result
+        except Exception as e:
+            logger.error(f"Error parsing transaction: {e}", exc_info=True)
+            # Return a low-confidence result rather than crashing
+            return ParsedTransaction(
+                action=TransactionAction.OUTGOING,
+                amount=None,
+                source=None,
+                destination=None,
+                description=None,
+                raw_text=text,
+                confidence=0.0,
+            )
 
     def _detect_action(self, text_lower: str, doc) -> TransactionAction:
         """Detect the transaction action type from text."""
@@ -294,8 +360,33 @@ class TransactionNLPService:
 
         Returns:
             List of ParsedTransaction objects
+
+        Raises:
+            ValueError: If texts is not a list
         """
-        return [self.parse(text) for text in texts]
+        if not isinstance(texts, list):
+            raise ValueError(f"texts must be a list, got {type(texts)}")
+
+        results = []
+        for i, text in enumerate(texts):
+            try:
+                results.append(self.parse(text))
+            except Exception as e:
+                logger.warning(f"Error parsing text {i}: {e}")
+                # Add a failed parse result
+                results.append(
+                    ParsedTransaction(
+                        action=TransactionAction.OUTGOING,
+                        amount=None,
+                        source=None,
+                        destination=None,
+                        description=None,
+                        raw_text=text if isinstance(text, str) else "",
+                        confidence=0.0,
+                    )
+                )
+
+        return results
 
 
 # Singleton instance for convenience
@@ -303,10 +394,20 @@ _default_service: Optional[TransactionNLPService] = None
 
 
 def get_nlp_service() -> TransactionNLPService:
-    """Get or create the default NLP service instance."""
+    """
+    Get or create the default NLP service instance.
+
+    Raises:
+        RuntimeError: If spaCy model is not installed
+    """
     global _default_service
     if _default_service is None:
-        _default_service = TransactionNLPService()
+        try:
+            _default_service = TransactionNLPService()
+            logger.info("Default NLP service initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize NLP service: {e}", exc_info=True)
+            raise
     return _default_service
 
 
@@ -319,5 +420,9 @@ def parse_transaction(text: str) -> ParsedTransaction:
 
     Returns:
         ParsedTransaction with extracted fields
+
+    Raises:
+        ValueError: If text is invalid
+        RuntimeError: If spaCy model is not installed
     """
     return get_nlp_service().parse(text)
