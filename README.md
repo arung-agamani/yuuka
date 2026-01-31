@@ -24,35 +24,236 @@ incoming salary 21m to main pocket
 
 ## Prerequisites
 
-- Python 3.10 or higher
+- Python 3.12 (recommended - Python 3.14 is not yet fully supported by all dependencies)
 - Poetry (Python package manager)
 - Discord Bot Token ([Get one here](https://discord.com/developers/applications))
 
+> **Note:** Python 3.14 may cause issues with packages like `spacy`, `thinc`, and `blis` as prebuilt wheels are not yet available. Stick with Python 3.12 for the best experience.
+
 ## Installation
 
-### 1. Install Poetry
+### 1. Install Python 3.12
 
-#### macOS / Linux
+Choose your preferred Python version manager:
+
+<details>
+<summary><b>Option A: Using uv (Recommended)</b></summary>
+
+Modern, fast Python version manager written in Rust.
 
 ```bash
-curl -sSL https://install.python-poetry.org | python3 -
+# Install uv if you haven't already
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install Python 3.12
+uv python install 3.12
+
+# Verify installation
+uv python list
 ```
 
-#### Windows (PowerShell)
+When configuring Poetry later, use:
+```bash
+poetry env use ~/.local/share/uv/python/cpython-3.12.*/bin/python3
+```
+
+</details>
+
+<details>
+<summary><b>Option B: Using pyenv</b></summary>
+
+Popular Python version manager for Unix-like systems.
+
+**Installation:**
+
+```bash
+# macOS (using Homebrew)
+brew install pyenv
+
+# Linux (using pyenv-installer)
+curl https://pyenv.run | bash
+```
+
+After installation, add to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.):
+
+```bash
+export PYENV_ROOT="$HOME/.pyenv"
+export PATH="$PYENV_ROOT/bin:$PATH"
+eval "$(pyenv init -)"
+```
+
+**Install Python 3.12:**
+
+```bash
+# Install Python 3.12
+pyenv install 3.12
+
+# Set as global default (optional)
+pyenv global 3.12
+
+# Or set for this project only
+cd yuuka
+pyenv local 3.12
+```
+
+When configuring Poetry later, use:
+```bash
+poetry env use $(pyenv which python3.12)
+```
+
+</details>
+
+<details>
+<summary><b>Option C: Using asdf</b></summary>
+
+Universal version manager that handles multiple languages.
+
+**Installation:**
+
+```bash
+# Install asdf
+git clone https://github.com/asdf-vm/asdf.git ~/.asdf --branch v0.14.0
+
+# Add to your shell profile (~/.bashrc, ~/.zshrc, etc.)
+. "$HOME/.asdf/asdf.sh"
+```
+
+**Install Python plugin and Python 3.12:**
+
+```bash
+# Install Python plugin
+asdf plugin add python
+
+# Install Python 3.12
+asdf install python 3.12.7
+
+# Set globally (optional)
+asdf global python 3.12.7
+
+# Or set for this project only
+cd yuuka
+asdf local python 3.12.7
+```
+
+When configuring Poetry later, use:
+```bash
+poetry env use python3.12
+```
+
+</details>
+
+<details>
+<summary><b>Option D: System Package Manager</b></summary>
+
+Use your operating system's package manager.
+
+**Ubuntu/Debian:**
+```bash
+sudo apt update
+sudo apt install python3.12 python3.12-venv python3.12-dev
+```
+
+**Fedora:**
+```bash
+sudo dnf install python3.12 python3.12-devel
+```
+
+**macOS (using Homebrew):**
+```bash
+brew install python@3.12
+```
+
+**Windows:**
+1. Download from [python.org](https://www.python.org/downloads/)
+2. Run the installer
+3. **Important:** Check "Add Python to PATH" during installation
+
+When configuring Poetry later, use:
+```bash
+poetry env use python3.12
+```
+
+</details>
+
+### 2. Install Poetry
+
+Choose the method that matches your Python installation:
+
+<details>
+<summary><b>Using uv</b></summary>
+
+If you installed Python with uv:
+
+```bash
+uv tool install poetry
+```
+
+</details>
+
+<details>
+<summary><b>Using pipx (Recommended for pyenv/asdf/system Python)</b></summary>
+
+```bash
+# Install pipx first
+python3.12 -m pip install --user pipx
+python3.12 -m pipx ensurepath
+
+# Install Poetry
+pipx install poetry
+```
+
+</details>
+
+<details>
+<summary><b>Official installer</b></summary>
+
+**macOS / Linux:**
+
+```bash
+curl -sSL https://install.python-poetry.org | python3.12 -
+```
+
+**Windows (PowerShell):**
 
 ```powershell
-(Invoke-WebRequest -Uri https://install.python-poetry.org -UseBasicParsing).Content | py -
+(Invoke-WebRequest -Uri https://install.python-poetry.org -UseBasicParsing).Content | py -3.12 -
 ```
 
-After installation, add Poetry to your PATH if it's not automatically added.
+</details>
 
-### 2. Clone or Download the Project
+After installation, add Poetry to your PATH if it's not automatically added.
+- **Linux/macOS:** `~/.local/bin`
+- **Windows:** `%APPDATA%\Python\Scripts`
+
+### 3. Clone or Download the Project
 
 ```bash
 cd yuuka
 ```
 
-### 3. Install Dependencies
+### 4. Configure Poetry to Use Python 3.12
+
+```bash
+# Configure Poetry to use the Python 3.12 you installed
+# (use the appropriate command from your installation method above)
+
+# For uv:
+poetry env use ~/.local/share/uv/python/cpython-3.12.*/bin/python3
+
+# For pyenv:
+poetry env use $(pyenv which python3.12)
+
+# For asdf or system Python:
+poetry env use python3.12
+
+# Verify the Python version
+poetry env info
+
+# Configure Poetry to prefer binary packages (recommended - faster installation)
+poetry config installer.prefer-binary true
+```
+
+### 5. Install Dependencies
 
 ```bash
 poetry install
@@ -65,13 +266,13 @@ This will create a virtual environment and install all required packages includi
 - openpyxl
 - and more...
 
-### 4. Download spaCy Language Model
+### 6. Download spaCy Language Model
 
 ```bash
 poetry run python -m spacy download en_core_web_sm
 ```
 
-### 5. Configure Your Bot Token
+### 7. Configure Your Bot Token
 
 Copy the example environment file:
 
@@ -213,6 +414,11 @@ yuuka/data/yuuka.db
 
 ### spaCy model not found
 - Run `poetry run python -m spacy download en_core_web_sm`
+
+### Packages building from source / taking too long to install
+- Ensure you're using Python 3.12, not 3.14
+- Configure Poetry to prefer binary packages: `poetry config installer.prefer-binary true`
+- Recreate the environment: `poetry env remove --all` then `poetry install`
 
 ### Bot doesn't respond to messages
 - Ensure "Message Content Intent" is enabled in Discord Developer Portal
