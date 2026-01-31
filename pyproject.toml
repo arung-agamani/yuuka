@@ -1,0 +1,39 @@
+[tool.poetry]
+name = "yuuka"
+version = "0.1.0"
+description = "Transaction NLP Service for ledger applications"
+authors = ["Arung Agamani"]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.10"
+spacy = "^3.7"
+discord-py = "^2.6.4"
+python-dotenv = "^1.2.1"
+seaborn = "^0.13.2"
+matplotlib = "^3.10.8"
+openpyxl = "^3.1.5"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.0"
+pytest-cov = "^4.0"
+
+[tool.poetry.scripts]
+yuuka = "yuuka.main:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+ignore = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
