@@ -1,3 +1,4 @@
+from .accounts import AccountsCog
 from .budget import BudgetCog
 from .export import ExportCog
 from .general import GeneralCog
@@ -6,6 +7,7 @@ from .parsing import ParsingCog
 from .recap import RecapCog
 
 __all__ = [
+    "AccountsCog",
     "BudgetCog",
     "ExportCog",
     "GeneralCog",

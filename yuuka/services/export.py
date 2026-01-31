@@ -84,7 +84,7 @@ class ExportService:
                     entry.id,
                     entry.created_at.strftime("%Y-%m-%d"),
                     entry.created_at.strftime("%H:%M:%S"),
-                    entry.action.value,
+                    entry.action,
                     entry.amount,
                     entry.source or "",
                     entry.destination or "",
@@ -163,7 +163,7 @@ class ExportService:
             ws.cell(row=row_idx, column=1, value=entry.id)
             ws.cell(row=row_idx, column=2, value=entry.created_at.strftime("%Y-%m-%d"))
             ws.cell(row=row_idx, column=3, value=entry.created_at.strftime("%H:%M:%S"))
-            ws.cell(row=row_idx, column=4, value=entry.action.value)
+            ws.cell(row=row_idx, column=4, value=entry.action)
             ws.cell(row=row_idx, column=5, value=entry.amount)
             ws.cell(row=row_idx, column=6, value=entry.source or "")
             ws.cell(row=row_idx, column=7, value=entry.destination or "")
@@ -172,7 +172,7 @@ class ExportService:
             ws.cell(row=row_idx, column=10, value=entry.confidence)
 
             # Color code by action type
-            action = entry.action.value
+            action = entry.action
             if action == "incoming":
                 fill = incoming_fill
             elif action == "outgoing":
@@ -228,9 +228,9 @@ class ExportService:
         )
 
         # Calculate totals
-        total_incoming = sum(e.amount for e in entries if e.action.value == "incoming")
-        total_outgoing = sum(e.amount for e in entries if e.action.value == "outgoing")
-        total_transfer = sum(e.amount for e in entries if e.action.value == "transfer")
+        total_incoming = sum(e.amount for e in entries if e.action == "incoming")
+        total_outgoing = sum(e.amount for e in entries if e.action == "outgoing")
+        total_transfer = sum(e.amount for e in entries if e.action == "transfer")
         net = total_incoming - total_outgoing
 
         # Summary table
@@ -239,9 +239,9 @@ class ExportService:
         ws.cell(row=summary_start, column=2, value="Count").font = header_font
         ws.cell(row=summary_start, column=3, value="Total").font = header_font
 
-        incoming_count = sum(1 for e in entries if e.action.value == "incoming")
-        outgoing_count = sum(1 for e in entries if e.action.value == "outgoing")
-        transfer_count = sum(1 for e in entries if e.action.value == "transfer")
+        incoming_count = sum(1 for e in entries if e.action == "incoming")
+        outgoing_count = sum(1 for e in entries if e.action == "outgoing")
+        transfer_count = sum(1 for e in entries if e.action == "transfer")
 
         ws.cell(row=summary_start + 1, column=1, value="Incoming")
         ws.cell(row=summary_start + 1, column=2, value=incoming_count)

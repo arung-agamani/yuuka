@@ -17,6 +17,7 @@ from yuuka.services.export import ExportService
 from yuuka.services.recap import RecapService
 
 from .cogs import (
+    AccountsCog,
     BudgetCog,
     ExportCog,
     GeneralCog,
@@ -111,6 +112,14 @@ class YuukaBot(commands.Bot):
                 )
             )
             logger.info("Added ExportCog")
+
+            await self.add_cog(
+                AccountsCog(
+                    self,
+                    self.repository,
+                )
+            )
+            logger.info("Added AccountsCog")
 
             # Sync commands with Discord
             await self.tree.sync()

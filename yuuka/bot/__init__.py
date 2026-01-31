@@ -1,5 +1,6 @@
 from .client import YuukaBot, create_bot
 from .cogs import (
+    AccountsCog,
     BudgetCog,
     ExportCog,
     GeneralCog,
@@ -22,6 +23,7 @@ __all__ = [
     "create_bot",
     "run",
     # Cogs
+    "AccountsCog",
     "BudgetCog",
     "ExportCog",
     "GeneralCog",

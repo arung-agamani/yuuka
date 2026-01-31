@@ -126,8 +126,8 @@ class RecapService:
             user_id, for_date, for_date
         )
 
-        incoming = sum(e.amount for e in entries if e.action.value == "incoming")
-        outgoing = sum(e.amount for e in entries if e.action.value == "outgoing")
+        incoming = sum(e.amount for e in entries if e.action == "incoming")
+        outgoing = sum(e.amount for e in entries if e.action == "outgoing")
 
         return DailySummary(
             date=for_date,
@@ -264,10 +264,10 @@ class RecapService:
         )
         daily_summaries = [
             DailySummary(
-                date=day,
+                date=date.fromisoformat(day) if isinstance(day, str) else day,
                 incoming=totals["incoming"],
                 outgoing=totals["outgoing"],
-                net=totals["net"],
+                net=totals.get("net", totals["incoming"] - totals["outgoing"]),
                 transaction_count=0,  # Not tracked in daily_totals
             )
             for day, totals in sorted(daily_totals.items())
