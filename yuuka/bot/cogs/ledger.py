@@ -1,7 +1,7 @@
 """
 Ledger Cog for viewing and managing ledger entries.
 
-Handles the /history, /summary, /balance, /delete, /accounts, /trial_balance,
+Handles the /history, /summary, /balance, /delete, /edit, /accounts, /trial_balance,
 /income_statement, and /balance_sheet commands.
 
 This cog supports the double-entry bookkeeping system with proper
@@ -9,6 +9,7 @@ debit/credit accounting.
 """
 
 import logging
+from typing import Optional
 
 import discord
 from discord import app_commands
@@ -19,6 +20,174 @@ from yuuka.models import TransactionAction
 from yuuka.models.account import AccountType
 
 logger = logging.getLogger(__name__)
+
+
+class EditTransactionModal(discord.ui.Modal, title="Edit Transaction"):
+    """Modal for editing an existing transaction."""
+
+    amount = discord.ui.TextInput(
+        label="Amount",
+        placeholder="Enter new amount (leave empty to keep current)",
+        required=False,
+        max_length=20,
+    )
+
+    source = discord.ui.TextInput(
+        label="Source (from)",
+        placeholder="Enter new source account (leave empty to keep current)",
+        required=False,
+        max_length=100,
+    )
+
+    destination = discord.ui.TextInput(
+        label="Destination (to)",
+        placeholder="Enter new destination account (leave empty to keep current)",
+        required=False,
+        max_length=100,
+    )
+
+    description = discord.ui.TextInput(
+        label="Description",
+        placeholder="Enter new description (leave empty to keep current)",
+        required=False,
+        max_length=200,
+        style=discord.TextStyle.short,
+    )
+
+    def __init__(
+        self,
+        repository: LedgerRepository,
+        transaction_id: int,
+        user_id: str,
+        current_amount: float,
+        current_source: Optional[str],
+        current_destination: Optional[str],
+        current_description: Optional[str],
+    ):
+        super().__init__()
+        self.repository = repository
+        self.transaction_id = transaction_id
+        self.user_id = user_id
+
+        # Pre-fill with current values
+        self.amount.default = str(int(current_amount)) if current_amount else ""
+        self.source.default = current_source or ""
+        self.destination.default = current_destination or ""
+        self.description.default = current_description or ""
+
+    async def on_submit(self, interaction: discord.Interaction):
+        """Handle modal submission."""
+        try:
+            # Parse and validate amount
+            new_amount = None
+            if self.amount.value and self.amount.value.strip():
+                try:
+                    # Remove commas and parse
+                    amount_str = (
+                        self.amount.value.strip().replace(",", "").replace(".", "")
+                    )
+                    new_amount = float(amount_str)
+                    if new_amount <= 0:
+                        await interaction.response.send_message(
+                            "❌ Amount must be a positive number.",
+                            ephemeral=True,
+                        )
+                        return
+                except ValueError:
+                    await interaction.response.send_message(
+                        "❌ Invalid amount format. Please enter a number.",
+                        ephemeral=True,
+                    )
+                    return
+
+            # Get new values (None means keep current)
+            new_source = (
+                self.source.value.strip() if self.source.value.strip() else None
+            )
+            new_destination = (
+                self.destination.value.strip()
+                if self.destination.value.strip()
+                else None
+            )
+            new_description = (
+                self.description.value.strip()
+                if self.description.value.strip()
+                else None
+            )
+
+            # Check if anything changed
+            if (
+                new_amount is None
+                and new_source is None
+                and new_destination is None
+                and new_description is None
+            ):
+                await interaction.response.send_message(
+                    "ℹ️ No changes made. All fields were left empty.",
+                    ephemeral=True,
+                )
+                return
+
+            # Update the transaction
+            updated_txn = self.repository.update_transaction(
+                transaction_id=self.transaction_id,
+                user_id=self.user_id,
+                new_amount=new_amount,
+                new_source=new_source,
+                new_destination=new_destination,
+                new_description=new_description,
+            )
+
+            if updated_txn:
+                # Format the updated transaction for display
+                lines = [
+                    f"✅ Transaction `#{self.transaction_id}` updated successfully!",
+                    "",
+                    "**Updated values:**",
+                    "```",
+                ]
+
+                # Show the journal entries
+                for entry in updated_txn.entries:
+                    entry_type = "DR" if entry.entry_type.value == "debit" else "CR"
+                    lines.append(
+                        f"{entry_type} {entry.account_name:<20} {entry.amount:>12,.0f}"
+                    )
+
+                lines.append("```")
+
+                if updated_txn.description:
+                    lines.append(f"📝 Description: {updated_txn.description}")
+
+                await interaction.response.send_message(
+                    "\n".join(lines),
+                    ephemeral=True,
+                )
+                logger.info(
+                    f"User {self.user_id} updated transaction {self.transaction_id}"
+                )
+            else:
+                await interaction.response.send_message(
+                    "❌ Failed to update transaction. It may have been deleted.",
+                    ephemeral=True,
+                )
+
+        except Exception as e:
+            logger.error(f"Error in EditTransactionModal.on_submit: {e}", exc_info=True)
+            await interaction.response.send_message(
+                "❌ An error occurred while updating the transaction. Please try again.",
+                ephemeral=True,
+            )
+
+    async def on_error(
+        self, interaction: discord.Interaction, error: Exception
+    ) -> None:
+        """Handle modal errors."""
+        logger.error(f"Error in EditTransactionModal: {error}", exc_info=True)
+        await interaction.response.send_message(
+            "❌ An error occurred. Please try again.",
+            ephemeral=True,
+        )
 
 
 def format_entry(entry: LedgerEntry) -> str:
@@ -201,46 +370,41 @@ class LedgerCog(commands.Cog):
 
     @app_commands.command(name="balance", description="View balances by account")
     async def balance_command(self, interaction: discord.Interaction):
-        """Show balance breakdown by account using double-entry bookkeeping."""
+        """Show balance breakdown by ASSET accounts (your pockets/wallets)."""
         try:
             user_id = str(interaction.user.id)
-            balances = self.repository.get_user_balance_by_account(user_id)
 
-            if not balances:
+            # Get balance sheet which properly categorizes accounts
+            balance_sheet = self.repository.get_balance_sheet(user_id)
+
+            if not balance_sheet or not balance_sheet.get("assets"):
                 await interaction.response.send_message(
-                    "📭 No accounts found. Start by recording some transactions!",
+                    "📭 No asset accounts found. Start by recording some transactions!",
                     ephemeral=True,
                 )
-                logger.debug(f"No balances found for user {user_id}")
+                logger.debug(f"No asset balances found for user {user_id}")
                 return
 
-            # Get account types for better display
-            accounts = self.repository.get_user_accounts(user_id)
-            account_types = {acc.name: acc.account_type for acc in accounts}
+            # Get assets sorted by balance descending
+            assets = sorted(
+                balance_sheet["assets"],
+                key=lambda x: x["amount"],
+                reverse=True,
+            )
 
-            # Sort by balance descending
-            sorted_balances = sorted(balances.items(), key=lambda x: x[1], reverse=True)
+            lines = ["💰 **Your Pockets/Wallets**", "```"]
 
-            lines = ["💰 **Account Balances** (Double-Entry)", "```"]
-
-            for account, balance in sorted_balances:
-                emoji = "+" if balance >= 0 else ""
-                safe_account = account[:20] if account else "Unknown"
-                acc_type = account_types.get(account, AccountType.ASSET)
-                type_abbr = acc_type.value[:3].upper()
-                lines.append(
-                    f"[{type_abbr}] {safe_account:<16} | {emoji}{balance:>12,.0f}"
-                )
+            for asset in assets:
+                name = asset["name"][:22] if asset["name"] else "Unknown"
+                amount = asset["amount"]
+                emoji = "+" if amount >= 0 else ""
+                lines.append(f"{name:<22} | {emoji}{amount:>12,.0f}")
 
             lines.append("```")
 
             # Add total
-            total_balance = sum(
-                bal
-                for acc, bal in balances.items()
-                if account_types.get(acc, AccountType.ASSET) == AccountType.ASSET
-            )
-            lines.append(f"\n💵 **Total Assets:** {total_balance:,.0f}")
+            total_assets = balance_sheet["total_assets"]
+            lines.append(f"\n💵 **Total Balance:** {total_assets:,.0f}")
 
             message = "\n".join(lines)
             if len(message) > 2000:
@@ -249,7 +413,7 @@ class LedgerCog(commands.Cog):
 
             await interaction.response.send_message(message, ephemeral=True)
             logger.info(
-                f"Showed balances for {len(balances)} accounts for user {user_id}"
+                f"Showed balances for {len(assets)} asset accounts for user {user_id}"
             )
         except ValueError as e:
             logger.warning(f"Validation error in balance_command: {e}")
@@ -499,8 +663,74 @@ class LedgerCog(commands.Cog):
                 ephemeral=True,
             )
 
-    @app_commands.command(name="delete", description="Delete a transaction by ID")
-    @app_commands.describe(entry_id="The transaction ID to delete")
+    @app_commands.command(name="edit", description="Edit an existing transaction")
+    @app_commands.describe(entry_id="The ID of the transaction to edit")
+    async def edit_command(self, interaction: discord.Interaction, entry_id: int):
+        """Edit an existing transaction via modal."""
+        try:
+            user_id = str(interaction.user.id)
+
+            # Validate entry_id
+            if entry_id <= 0:
+                await interaction.response.send_message(
+                    "❌ Invalid entry ID. Please provide a positive number.",
+                    ephemeral=True,
+                )
+                return
+
+            # Get the existing entry
+            entry = self.repository.get_by_id(entry_id)
+
+            if not entry:
+                await interaction.response.send_message(
+                    f"❌ Transaction `#{entry_id}` not found.",
+                    ephemeral=True,
+                )
+                return
+
+            # Check ownership
+            if entry.user_id != user_id:
+                await interaction.response.send_message(
+                    "❌ You can only edit your own transactions.",
+                    ephemeral=True,
+                )
+                logger.warning(
+                    f"User {user_id} attempted to edit entry {entry_id} owned by {entry.user_id}"
+                )
+                return
+
+            # Open the edit modal with current values
+            modal = EditTransactionModal(
+                repository=self.repository,
+                transaction_id=entry.transaction_id or entry_id,
+                user_id=user_id,
+                current_amount=entry.amount,
+                current_source=entry.source,
+                current_destination=entry.destination,
+                current_description=entry.description,
+            )
+
+            await interaction.response.send_modal(modal)
+            logger.info(f"Opened edit modal for entry {entry_id} for user {user_id}")
+
+        except ValueError as e:
+            logger.warning(f"Validation error in edit_command: {e}")
+            await interaction.response.send_message(
+                f"❌ Invalid input: {str(e)}",
+                ephemeral=True,
+            )
+        except Exception as e:
+            logger.error(f"Error in edit_command: {e}", exc_info=True)
+            error_msg = (
+                "❌ An error occurred while preparing the edit form. Please try again."
+            )
+            if interaction.response.is_done():
+                await interaction.followup.send(error_msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(error_msg, ephemeral=True)
+
+    @app_commands.command(name="delete", description="Delete a transaction")
+    @app_commands.describe(entry_id="The ID of the transaction to delete")
     async def delete_command(self, interaction: discord.Interaction, entry_id: int):
         """Delete a transaction entry and its associated double-entry records."""
         try:

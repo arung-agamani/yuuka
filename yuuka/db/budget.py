@@ -26,6 +26,7 @@ class BudgetConfig:
     payday: int  # Day of month when payslip arrives (1-31)
     monthly_income: Optional[float]  # Expected monthly income
     warning_threshold: float  # Percentage at which to warn (e.g., 0.2 = 20% remaining)
+    daily_recap_enabled: bool  # Whether to send daily recap DMs at 00:00 UTC+7
     created_at: datetime
     updated_at: datetime
 
@@ -78,6 +79,7 @@ class BudgetConfig:
             "payday": self.payday,
             "monthly_income": self.monthly_income,
             "warning_threshold": self.warning_threshold,
+            "daily_recap_enabled": self.daily_recap_enabled,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
@@ -92,8 +94,13 @@ class BudgetConfig:
             payday=row[3],
             monthly_income=row[4],
             warning_threshold=row[5],
-            created_at=datetime.fromisoformat(row[6]),
-            updated_at=datetime.fromisoformat(row[7]),
+            daily_recap_enabled=bool(row[6]) if len(row) > 6 else True,
+            created_at=datetime.fromisoformat(row[7])
+            if len(row) > 7
+            else datetime.now(),
+            updated_at=datetime.fromisoformat(row[8])
+            if len(row) > 8
+            else datetime.now(),
         )
 
 
@@ -149,10 +156,21 @@ class BudgetRepository:
                     payday INTEGER NOT NULL DEFAULT 25 CHECK(payday >= 1 AND payday <= 31),
                     monthly_income REAL CHECK(monthly_income IS NULL OR monthly_income >= 0),
                     warning_threshold REAL NOT NULL DEFAULT 0.2 CHECK(warning_threshold >= 0 AND warning_threshold <= 1),
+                    daily_recap_enabled INTEGER NOT NULL DEFAULT 1 CHECK(daily_recap_enabled IN (0, 1)),
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
             """)
+
+            # Migration: add daily_recap_enabled column if it doesn't exist
+            try:
+                conn.execute(
+                    "ALTER TABLE budget_config ADD COLUMN daily_recap_enabled INTEGER NOT NULL DEFAULT 1"
+                )
+                logger.info("Added daily_recap_enabled column to budget_config")
+            except Exception:
+                # Column already exists
+                pass
 
             # Create index for faster user lookups
             conn.execute("""
@@ -199,6 +217,7 @@ class BudgetRepository:
         payday: Optional[int] = None,
         monthly_income: Optional[float] = None,
         warning_threshold: Optional[float] = None,
+        daily_recap_enabled: Optional[bool] = None,
     ) -> BudgetConfig:
         """
         Create or update budget config for a user.
@@ -209,6 +228,7 @@ class BudgetRepository:
             payday: Day of month for payslip (1-31)
             monthly_income: Expected monthly income (must be >= 0)
             warning_threshold: Warning threshold percentage (0-1)
+            daily_recap_enabled: Whether to send daily recap DMs
 
         Returns:
             The created or updated BudgetConfig
@@ -259,12 +279,17 @@ class BudgetRepository:
                         if warning_threshold is not None
                         else existing.warning_threshold
                     )
+                    new_daily_recap_enabled = (
+                        daily_recap_enabled
+                        if daily_recap_enabled is not None
+                        else existing.daily_recap_enabled
+                    )
 
                     conn.execute(
                         """
                         UPDATE budget_config
                         SET daily_limit = ?, payday = ?, monthly_income = ?,
-                            warning_threshold = ?, updated_at = ?
+                            warning_threshold = ?, daily_recap_enabled = ?, updated_at = ?
                         WHERE user_id = ?
                         """,
                         (
@@ -272,6 +297,7 @@ class BudgetRepository:
                             new_payday,
                             new_monthly_income,
                             new_warning_threshold,
+                            1 if new_daily_recap_enabled else 0,
                             now.isoformat(),
                             user_id,
                         ),
@@ -286,6 +312,7 @@ class BudgetRepository:
                         payday=new_payday,
                         monthly_income=new_monthly_income,
                         warning_threshold=new_warning_threshold,
+                        daily_recap_enabled=new_daily_recap_enabled,
                         created_at=existing.created_at,
                         updated_at=now,
                     )
@@ -298,13 +325,16 @@ class BudgetRepository:
                     new_warning_threshold = (
                         warning_threshold if warning_threshold is not None else 0.2
                     )
+                    new_daily_recap_enabled = (
+                        daily_recap_enabled if daily_recap_enabled is not None else True
+                    )
 
                     cursor = conn.execute(
                         """
                         INSERT INTO budget_config (
                             user_id, daily_limit, payday, monthly_income,
-                            warning_threshold, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                            warning_threshold, daily_recap_enabled, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             user_id,
@@ -312,6 +342,7 @@ class BudgetRepository:
                             new_payday,
                             monthly_income,
                             new_warning_threshold,
+                            1 if new_daily_recap_enabled else 0,
                             now.isoformat(),
                             now.isoformat(),
                         ),
@@ -326,6 +357,7 @@ class BudgetRepository:
                         payday=new_payday,
                         monthly_income=monthly_income,
                         warning_threshold=new_warning_threshold,
+                        daily_recap_enabled=new_daily_recap_enabled,
                         created_at=now,
                         updated_at=now,
                     )
@@ -371,18 +403,20 @@ class BudgetRepository:
             )
             raise
 
-    def get_all_users_with_config(self) -> list[str]:
+    def get_all_users_with_daily_recap_enabled(self) -> list[str]:
         """
-        Get all user IDs that have budget config (for scheduled recaps).
+        Get all user IDs that have daily recap enabled.
 
         Returns:
-            List of user IDs
+            List of user IDs with daily_recap_enabled = True
         """
         try:
             with self._get_connection() as conn:
-                cursor = conn.execute("SELECT user_id FROM budget_config")
+                cursor = conn.execute(
+                    "SELECT user_id FROM budget_config WHERE daily_recap_enabled = 1"
+                )
                 users = [row[0] for row in cursor.fetchall()]
-                logger.debug(f"Found {len(users)} users with budget config")
+                logger.debug(f"Found {len(users)} users with daily recap enabled")
                 return users
         except Exception as e:
             logger.error(f"Error getting all users with config: {e}", exc_info=True)

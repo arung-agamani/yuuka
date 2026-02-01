@@ -25,6 +25,7 @@ from .cogs import (
     ParsingCog,
     RecapCog,
 )
+from .scheduler import RecapScheduler, setup_scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,9 @@ class YuukaBot(commands.Bot):
 
             self.export_service = ExportService(self.repository)
             logger.info("Export service initialized")
+
+            # Scheduler will be set up in setup_hook when bot is ready
+            self.scheduler: Optional[RecapScheduler] = None
         except Exception as e:
             logger.error(f"Failed to initialize bot services: {e}", exc_info=True)
             raise
@@ -124,6 +128,11 @@ class YuukaBot(commands.Bot):
             # Sync commands with Discord
             await self.tree.sync()
             logger.info("Synced command tree with Discord")
+
+            # Set up and start the scheduler for daily recaps
+            self.scheduler = setup_scheduler(self)
+            self.scheduler.start()
+            logger.info("Started recap scheduler")
         except Exception as e:
             logger.error(f"Error in setup_hook: {e}", exc_info=True)
             raise
@@ -154,6 +163,13 @@ class YuukaBot(commands.Bot):
             exc_info=True,
             extra={"args": args, "kwargs": kwargs},
         )
+
+    async def close(self):
+        """Clean up resources when the bot is shutting down."""
+        if self.scheduler:
+            self.scheduler.stop()
+            logger.info("Stopped recap scheduler")
+        await super().close()
 
 
 def create_bot(repository: Optional[LedgerRepository] = None) -> YuukaBot:

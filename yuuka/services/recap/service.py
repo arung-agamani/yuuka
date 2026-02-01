@@ -9,7 +9,7 @@ Provides functionality for:
 
 import io
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Optional
 
@@ -66,6 +66,12 @@ class RecapReport:
     current_balance: float
     forecast: Optional[ForecastResult]
     daily_summaries: list[DailySummary]  # For chart data
+    spending_by_category: dict[str, float] = field(
+        default_factory=dict
+    )  # Spending breakdown by expense category
+    asset_balances: dict[str, float] = field(
+        default_factory=dict
+    )  # Current balance per asset account
 
 
 class RecapService:
@@ -273,6 +279,14 @@ class RecapService:
             for day, totals in sorted(daily_totals.items())
         ]
 
+        # Get spending breakdown by category (expense accounts)
+        spending_by_category = self.ledger_repo.get_spending_by_category(
+            user_id, period_start, for_date
+        )
+
+        # Get current asset balances
+        asset_balances = self.ledger_repo.get_asset_balances(user_id)
+
         return RecapReport(
             user_id=user_id,
             report_date=for_date,
@@ -282,6 +296,8 @@ class RecapService:
             current_balance=current_balance,
             forecast=forecast,
             daily_summaries=daily_summaries,
+            spending_by_category=spending_by_category,
+            asset_balances=asset_balances,
         )
 
     def generate_burndown_chart(
@@ -354,8 +370,24 @@ class RecapService:
                 }
             )
 
-            # Create figure with two subplots
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), height_ratios=[2, 1])
+            # Determine number of subplots based on available data
+            has_categories = bool(recap.spending_by_category)
+            has_assets = bool(recap.asset_balances)
+
+            if has_categories or has_assets:
+                # 3 subplots: balance, income/spending, and pie chart
+                fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+                ax1 = axes[0, 0]  # Balance burndown (top left)
+                ax2 = axes[1, 0]  # Daily income vs spending (bottom left)
+                ax3 = axes[0, 1]  # Spending by category pie (top right)
+                ax4 = axes[1, 1]  # Asset balances bar (bottom right)
+            else:
+                # 2 subplots: balance and income/spending
+                fig, (ax1, ax2) = plt.subplots(
+                    2, 1, figsize=(12, 8), height_ratios=[2, 1]
+                )
+                ax3 = None
+                ax4 = None
 
             # Color palette
             colors = {
@@ -482,6 +514,106 @@ class RecapService:
             ax2.legend(loc="upper right")
             ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, p: f"{x:,.0f}"))
 
+            # Plot 3: Spending by category (pie chart)
+            if ax3 is not None and recap.spending_by_category:
+                categories = recap.spending_by_category
+                if categories:
+                    # Sort by value and take top 6, group rest as "Other"
+                    sorted_cats = sorted(
+                        categories.items(), key=lambda x: x[1], reverse=True
+                    )
+                    if len(sorted_cats) > 6:
+                        top_cats = sorted_cats[:5]
+                        other_total = sum(v for _, v in sorted_cats[5:])
+                        top_cats.append(("Other", other_total))
+                    else:
+                        top_cats = sorted_cats
+
+                    labels = [cat for cat, _ in top_cats]
+                    sizes = [val for _, val in top_cats]
+
+                    # Color palette for pie
+                    pie_colors = sns.color_palette("husl", len(labels))
+
+                    wedges, texts, autotexts = ax3.pie(
+                        sizes,
+                        labels=labels,
+                        autopct=lambda pct: f"{pct:.1f}%" if pct > 5 else "",
+                        colors=pie_colors,
+                        startangle=90,
+                    )
+                    ax3.set_title(
+                        "Spending by Category", fontsize=14, fontweight="bold"
+                    )
+                else:
+                    ax3.text(
+                        0.5,
+                        0.5,
+                        "No expense data",
+                        ha="center",
+                        va="center",
+                        fontsize=12,
+                    )
+                    ax3.set_title(
+                        "Spending by Category", fontsize=14, fontweight="bold"
+                    )
+            elif ax3 is not None:
+                ax3.text(
+                    0.5, 0.5, "No expense data", ha="center", va="center", fontsize=12
+                )
+                ax3.set_title("Spending by Category", fontsize=14, fontweight="bold")
+                ax3.axis("off")
+
+            # Plot 4: Asset balances (horizontal bar chart)
+            if ax4 is not None and recap.asset_balances:
+                assets = recap.asset_balances
+                if assets:
+                    # Sort by balance
+                    sorted_assets = sorted(
+                        assets.items(), key=lambda x: x[1], reverse=True
+                    )
+                    names = [name for name, _ in sorted_assets]
+                    values = [val for _, val in sorted_assets]
+
+                    # Color based on positive/negative
+                    bar_colors = [
+                        colors["income"] if v >= 0 else colors["spending"]
+                        for v in values
+                    ]
+
+                    y_pos = range(len(names))
+                    ax4.barh(y_pos, values, color=bar_colors, alpha=0.8)
+                    ax4.set_yticks(y_pos)
+                    ax4.set_yticklabels(names)
+                    ax4.set_xlabel("Balance", fontsize=11)
+                    ax4.set_title(
+                        "Asset Balances (Your Pockets)", fontsize=14, fontweight="bold"
+                    )
+                    ax4.xaxis.set_major_formatter(
+                        FuncFormatter(lambda x, p: f"{x:,.0f}")
+                    )
+
+                    # Add value labels on bars
+                    for i, v in enumerate(values):
+                        ax4.text(
+                            v + (max(values) * 0.02),
+                            i,
+                            f"{v:,.0f}",
+                            va="center",
+                            fontsize=9,
+                        )
+                else:
+                    ax4.text(
+                        0.5, 0.5, "No asset data", ha="center", va="center", fontsize=12
+                    )
+                    ax4.set_title("Asset Balances", fontsize=14, fontweight="bold")
+            elif ax4 is not None:
+                ax4.text(
+                    0.5, 0.5, "No asset data", ha="center", va="center", fontsize=12
+                )
+                ax4.set_title("Asset Balances", fontsize=14, fontweight="bold")
+                ax4.axis("off")
+
             # Adjust layout
             plt.tight_layout()
 
@@ -595,6 +727,38 @@ class RecapService:
                             f"• Or find an additional **{forecast.savings_needed:,.0f}** "
                             f"to maintain current spending"
                         )
+
+            # Spending by category section
+            if recap.spending_by_category:
+                lines.append("")
+                lines.append("**Spending by Category:**")
+                lines.append("```")
+                sorted_cats = sorted(
+                    recap.spending_by_category.items(),
+                    key=lambda x: x[1],
+                    reverse=True,
+                )
+                for cat, amount in sorted_cats[:6]:  # Top 6 categories
+                    lines.append(f"  {cat:<18} {amount:>12,.0f}")
+                if len(sorted_cats) > 6:
+                    other_total = sum(v for _, v in sorted_cats[6:])
+                    lines.append(f"  {'Other':<18} {other_total:>12,.0f}")
+                lines.append("```")
+
+            # Asset balances section (your pockets)
+            if recap.asset_balances:
+                lines.append("")
+                lines.append("**Your Pockets:**")
+                lines.append("```")
+                sorted_assets = sorted(
+                    recap.asset_balances.items(),
+                    key=lambda x: x[1],
+                    reverse=True,
+                )
+                for name, balance in sorted_assets:
+                    emoji = "+" if balance >= 0 else ""
+                    lines.append(f"  {name:<18} {emoji}{balance:>11,.0f}")
+                lines.append("```")
 
             message = "\n".join(lines)
             logger.debug(f"Formatted recap message for user {recap.user_id}")

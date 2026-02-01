@@ -38,6 +38,7 @@ class BudgetCog(commands.Cog):
         daily_limit="Your daily spending limit",
         payday="Day of month when you get paid (1-31)",
         monthly_income="Your expected monthly income",
+        daily_recap="Enable/disable automatic daily recap DMs at 00:00 UTC+7",
     )
     async def budget_command(
         self,
@@ -45,6 +46,7 @@ class BudgetCog(commands.Cog):
         daily_limit: Optional[float] = None,
         payday: Optional[int] = None,
         monthly_income: Optional[float] = None,
+        daily_recap: Optional[bool] = None,
     ):
         """Configure budget settings for forecasting."""
         try:
@@ -73,13 +75,21 @@ class BudgetCog(commands.Cog):
                 return
 
             # If no arguments, show current config
-            if daily_limit is None and payday is None and monthly_income is None:
+            if (
+                daily_limit is None
+                and payday is None
+                and monthly_income is None
+                and daily_recap is None
+            ):
                 config = self.budget_repo.get_by_user(user_id)
                 if config:
                     monthly_inc_str = (
                         f"{config.monthly_income:,.0f}"
                         if config.monthly_income
                         else "Not set"
+                    )
+                    recap_status = (
+                        "✅ Enabled" if config.daily_recap_enabled else "❌ Disabled"
                     )
                     lines = [
                         "⚙️ **Your Budget Configuration**",
@@ -89,6 +99,7 @@ class BudgetCog(commands.Cog):
                         f"Monthly Income:  {monthly_inc_str:>15}",
                         f"Warning at:      {config.warning_threshold * 100:>14.0f}%",
                         "```",
+                        f"📬 Daily Recap DM: {recap_status}",
                         "",
                         f"Days until payday: **{config.days_until_payday()}**",
                     ]
@@ -111,12 +122,15 @@ class BudgetCog(commands.Cog):
                 daily_limit=daily_limit,
                 payday=payday,
                 monthly_income=monthly_income,
+                daily_recap_enabled=daily_recap,
             )
 
+            recap_status = "✅ Enabled" if config.daily_recap_enabled else "❌ Disabled"
             await interaction.response.send_message(
                 f"✅ Budget updated!\n"
                 f"• Daily limit: **{config.daily_limit:,.0f}**\n"
                 f"• Payday: **{config.payday}** (day of month)\n"
+                f"• Daily recap DM: {recap_status}\n"
                 f"• Days until payday: **{config.days_until_payday()}**",
                 ephemeral=True,
             )

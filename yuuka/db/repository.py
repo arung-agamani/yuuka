@@ -1840,6 +1840,195 @@ class LedgerRepository:
             logger.error(f"Error deleting entry {entry_id}: {e}", exc_info=True)
             raise
 
+    def update_transaction(
+        self,
+        transaction_id: int,
+        user_id: str,
+        new_amount: Optional[float] = None,
+        new_source: Optional[str] = None,
+        new_destination: Optional[str] = None,
+        new_description: Optional[str] = None,
+    ) -> Optional[Transaction]:
+        """
+        Update an existing transaction's amount, source, destination, or description.
+
+        This updates both the double-entry journal entries and the legacy ledger entry.
+
+        Args:
+            transaction_id: Transaction ID to update
+            user_id: User ID (for authorization)
+            new_amount: New amount (if changing)
+            new_source: New source account (if changing)
+            new_destination: New destination account (if changing)
+            new_description: New description (if changing)
+
+        Returns:
+            Updated Transaction if successful, None if not found or not authorized
+
+        Raises:
+            ValueError: If validation fails
+        """
+        if transaction_id <= 0:
+            raise ValueError(f"Invalid transaction_id: {transaction_id}")
+        if not user_id:
+            raise ValueError("User ID is required")
+        if new_amount is not None and new_amount <= 0:
+            raise ValueError(f"Amount must be positive, got {new_amount}")
+
+        try:
+            with self._get_connection() as conn:
+                # Get the transaction and verify ownership
+                cursor = conn.execute(
+                    """
+                    SELECT id, description, raw_text, confidence, user_id,
+                           guild_id, channel_id, message_id, created_at, confirmed
+                    FROM transactions
+                    WHERE id = ? AND user_id = ?
+                    """,
+                    (transaction_id, user_id),
+                )
+                txn_row = cursor.fetchone()
+
+                if not txn_row:
+                    logger.warning(
+                        f"Transaction {transaction_id} not found or not owned by user {user_id}"
+                    )
+                    return None
+
+                # Get the ledger entry for this transaction
+                cursor = conn.execute(
+                    """
+                    SELECT id, action, amount, source, destination
+                    FROM ledger_entries
+                    WHERE transaction_id = ? AND user_id = ?
+                    """,
+                    (transaction_id, user_id),
+                )
+                ledger_row = cursor.fetchone()
+
+                if not ledger_row:
+                    logger.error(
+                        f"No ledger entry found for transaction {transaction_id}"
+                    )
+                    return None
+
+                # Get current values
+                current_action = ledger_row["action"]
+                current_amount = ledger_row["amount"]
+                current_source = ledger_row["source"]
+                current_destination = ledger_row["destination"]
+                ledger_entry_id = ledger_row["id"]
+
+                # Determine new values
+                final_amount = new_amount if new_amount is not None else current_amount
+                final_source = new_source if new_source is not None else current_source
+                final_destination = (
+                    new_destination
+                    if new_destination is not None
+                    else current_destination
+                )
+                final_description = (
+                    new_description
+                    if new_description is not None
+                    else txn_row["description"]
+                )
+
+                # Resolve account groups for new source/destination
+                source_group = None
+                dest_group = None
+
+                if final_source:
+                    source_group = self.resolve_account_alias(final_source, user_id)
+                if final_destination:
+                    dest_group = self.resolve_account_alias(final_destination, user_id)
+
+                # Determine account names for journal entries
+                if current_action == "incoming":
+                    # Debit: destination (asset), Credit: source (revenue)
+                    debit_name = dest_group.name if dest_group else final_destination
+                    credit_name = source_group.name if source_group else final_source
+                elif current_action == "outgoing":
+                    # Debit: destination (expense), Credit: source (asset)
+                    debit_name = dest_group.name if dest_group else final_destination
+                    credit_name = source_group.name if source_group else final_source
+                else:  # transfer
+                    # Debit: destination (asset), Credit: source (asset)
+                    debit_name = dest_group.name if dest_group else final_destination
+                    credit_name = source_group.name if source_group else final_source
+
+                # Update journal entries
+                # First, get the debit and credit entries
+                cursor = conn.execute(
+                    """
+                    SELECT id, entry_type FROM journal_entries
+                    WHERE transaction_id = ?
+                    """,
+                    (transaction_id,),
+                )
+                journal_entries = cursor.fetchall()
+
+                for je in journal_entries:
+                    if je["entry_type"] == "debit":
+                        conn.execute(
+                            """
+                            UPDATE journal_entries
+                            SET amount = ?, account_name = ?
+                            WHERE id = ?
+                            """,
+                            (final_amount, debit_name or "Unknown", je["id"]),
+                        )
+                    else:  # credit
+                        conn.execute(
+                            """
+                            UPDATE journal_entries
+                            SET amount = ?, account_name = ?
+                            WHERE id = ?
+                            """,
+                            (final_amount, credit_name or "Unknown", je["id"]),
+                        )
+
+                # Update the transaction description
+                conn.execute(
+                    """
+                    UPDATE transactions
+                    SET description = ?
+                    WHERE id = ?
+                    """,
+                    (final_description, transaction_id),
+                )
+
+                # Update the legacy ledger entry
+                conn.execute(
+                    """
+                    UPDATE ledger_entries
+                    SET amount = ?, source = ?, destination = ?, description = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        final_amount,
+                        final_source,
+                        final_destination,
+                        final_description,
+                        ledger_entry_id,
+                    ),
+                )
+
+                logger.info(
+                    f"Updated transaction {transaction_id} for user {user_id}: "
+                    f"amount={final_amount}, src={final_source}, dest={final_destination}"
+                )
+
+                # Return the updated transaction
+                return self.get_transaction_by_id(transaction_id)
+
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error(
+                f"Error updating transaction {transaction_id}: {e}", exc_info=True
+            )
+            raise
+
     def count_user_entries(
         self,
         user_id: str,
@@ -2019,6 +2208,114 @@ class LedgerRepository:
             raise
         except Exception as e:
             logger.error(f"Error getting daily totals: {e}", exc_info=True)
+            raise
+
+    def get_spending_by_category(
+        self,
+        user_id: str,
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, float]:
+        """
+        Get spending breakdown by expense category (account group).
+
+        Args:
+            user_id: Discord user ID
+            start_date: Start date
+            end_date: End date
+
+        Returns:
+            Dictionary mapping expense account names to total spent
+        """
+        if not user_id:
+            raise ValueError("User ID is required")
+
+        try:
+            with self._get_connection() as conn:
+                # Get all outgoing transactions and sum by destination (expense category)
+                cursor = conn.execute(
+                    """
+                    SELECT
+                        je.account_name,
+                        SUM(je.amount) as total
+                    FROM journal_entries je
+                    JOIN transactions t ON je.transaction_id = t.id
+                    WHERE t.user_id = ?
+                      AND date(t.created_at) >= ?
+                      AND date(t.created_at) <= ?
+                      AND je.entry_type = 'debit'
+                      AND je.account_name IN (
+                          SELECT name FROM account_groups
+                          WHERE user_id = ? AND account_type = 'expense'
+                      )
+                    GROUP BY je.account_name
+                    ORDER BY total DESC
+                    """,
+                    (user_id, start_date.isoformat(), end_date.isoformat(), user_id),
+                )
+
+                categories: dict[str, float] = {}
+                for row in cursor.fetchall():
+                    categories[row["account_name"]] = row["total"] or 0.0
+
+                # If no categories found from account_groups, try legacy approach
+                if not categories:
+                    cursor = conn.execute(
+                        """
+                        SELECT
+                            COALESCE(destination, 'Other') as category,
+                            SUM(amount) as total
+                        FROM ledger_entries
+                        WHERE user_id = ?
+                          AND action = 'outgoing'
+                          AND date(created_at) >= ?
+                          AND date(created_at) <= ?
+                        GROUP BY destination
+                        ORDER BY total DESC
+                        """,
+                        (user_id, start_date.isoformat(), end_date.isoformat()),
+                    )
+                    for row in cursor.fetchall():
+                        categories[row["category"]] = row["total"] or 0.0
+
+                logger.debug(
+                    f"Got spending by category for user {user_id}: {len(categories)} categories"
+                )
+                return categories
+
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error(
+                f"Error getting spending by category for user {user_id}: {e}",
+                exc_info=True,
+            )
+            raise
+
+    def get_asset_balances(self, user_id: str) -> dict[str, float]:
+        """
+        Get balances for all asset accounts.
+
+        Args:
+            user_id: Discord user ID
+
+        Returns:
+            Dictionary mapping asset account names to their balances
+        """
+        if not user_id:
+            raise ValueError("User ID is required")
+
+        try:
+            balance_sheet = self.get_balance_sheet(user_id)
+            assets = {}
+            for asset in balance_sheet.get("assets", []):
+                assets[asset["name"]] = asset["amount"]
+            return assets
+        except Exception as e:
+            logger.error(
+                f"Error getting asset balances for user {user_id}: {e}",
+                exc_info=True,
+            )
             raise
 
     def get_total_balance(self, user_id: str) -> float:
