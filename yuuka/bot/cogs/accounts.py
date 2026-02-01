@@ -458,7 +458,7 @@ class AccountsCog(commands.Cog):
             if not group:
                 await interaction.response.send_message(
                     f"❌ Account group '{account_name}' not found.\n"
-                    f"Use `/accounts` to see your account groups.",
+                    f"Use `/account_groups` to see your account groups.",
                     ephemeral=True,
                 )
                 return
@@ -539,9 +539,9 @@ class AccountsCog(commands.Cog):
             )
 
     @app_commands.command(
-        name="accounts", description="View your account groups and their aliases"
+        name="account_groups", description="View your account groups and their aliases"
     )
-    async def accounts_command(self, interaction: discord.Interaction):
+    async def account_groups_command(self, interaction: discord.Interaction):
         """Show all account groups and their aliases."""
         try:
             user_id = str(interaction.user.id)
