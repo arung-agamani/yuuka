@@ -1585,47 +1585,77 @@ class LedgerRepository:
 
         try:
             with self._get_connection() as conn:
-                # Get all journal entries with account info for this user
-                # Use account_groups for canonical names, fallback to accounts
+                # Get all journal entries grouped by account name and entry type
                 cursor = conn.execute(
                     """
                     SELECT
                         je.account_name as name,
-                        COALESCE(ag.account_type, a.account_type) as acct_type,
                         je.entry_type,
                         SUM(je.amount) as total
                     FROM journal_entries je
-                    LEFT JOIN account_groups ag ON je.account_id = ag.id
-                    LEFT JOIN accounts a ON je.account_id = a.id
                     JOIN transactions t ON je.transaction_id = t.id
                     WHERE t.user_id = ?
-                    GROUP BY je.account_name, acct_type, je.entry_type
+                    GROUP BY je.account_name, je.entry_type
                     """,
                     (user_id,),
                 )
 
                 # Calculate balances using proper accounting rules
-                # Now we aggregate by account_name from journal entries,
-                # which uses the canonical group name when available
                 account_debits: dict[str, float] = {}
                 account_credits: dict[str, float] = {}
                 account_types: dict[str, AccountType] = {}
 
-                for row in cursor.fetchall():
+                rows = cursor.fetchall()
+
+                # First pass: collect debits and credits
+                for row in rows:
                     account_name = row["name"]
-                    account_type = AccountType(row["acct_type"])
                     entry_type = EntryType(row["entry_type"])
                     amount = row["total"] or 0.0
 
-                    if account_name not in account_types:
+                    if account_name not in account_debits:
                         account_debits[account_name] = 0.0
                         account_credits[account_name] = 0.0
-                        account_types[account_name] = account_type
 
                     if entry_type == EntryType.DEBIT:
                         account_debits[account_name] += amount
                     else:
                         account_credits[account_name] += amount
+
+                # Second pass: lookup account types by name
+                for account_name in account_debits.keys():
+                    # Try account_groups first
+                    type_cursor = conn.execute(
+                        """
+                        SELECT account_type FROM account_groups
+                        WHERE name = ? AND user_id = ?
+                        """,
+                        (account_name, user_id),
+                    )
+                    type_row = type_cursor.fetchone()
+
+                    if type_row:
+                        account_types[account_name] = AccountType(
+                            type_row["account_type"]
+                        )
+                    else:
+                        # Fall back to accounts table
+                        type_cursor = conn.execute(
+                            """
+                            SELECT account_type FROM accounts
+                            WHERE name = ? AND user_id = ?
+                            """,
+                            (account_name, user_id),
+                        )
+                        type_row = type_cursor.fetchone()
+
+                        if type_row:
+                            account_types[account_name] = AccountType(
+                                type_row["account_type"]
+                            )
+                        else:
+                            # Default to asset if not found anywhere
+                            account_types[account_name] = AccountType.ASSET
 
                 # Calculate final balances based on account type
                 balances: dict[str, float] = {}
@@ -2262,26 +2292,52 @@ class LedgerRepository:
             balances = self.get_user_balance_by_account(user_id)
 
             with self._get_connection() as conn:
-                # Get account types from both account_groups and accounts
-                # This ensures we get the correct type for accounts that use groups
+                # Get account types by looking up account names in both tables
+                # First try account_groups (priority), then fall back to accounts
                 cursor = conn.execute(
                     """
-                    SELECT DISTINCT
-                        je.account_name as name,
-                        COALESCE(ag.account_type, a.account_type) as account_type
+                    SELECT DISTINCT je.account_name as name
                     FROM journal_entries je
-                    LEFT JOIN account_groups ag ON je.account_id = ag.id
-                    LEFT JOIN accounts a ON je.account_id = a.id
                     JOIN transactions t ON je.transaction_id = t.id
                     WHERE t.user_id = ?
                     """,
                     (user_id,),
                 )
 
-                account_types = {
-                    row["name"]: AccountType(row["account_type"])
-                    for row in cursor.fetchall()
-                }
+                account_names = [row["name"] for row in cursor.fetchall()]
+                account_types = {}
+
+                for name in account_names:
+                    # Try to find in account_groups first
+                    group_cursor = conn.execute(
+                        """
+                        SELECT account_type FROM account_groups
+                        WHERE name = ? AND user_id = ?
+                        """,
+                        (name, user_id),
+                    )
+                    group_row = group_cursor.fetchone()
+
+                    if group_row:
+                        account_types[name] = AccountType(group_row["account_type"])
+                    else:
+                        # Fall back to accounts table
+                        account_cursor = conn.execute(
+                            """
+                            SELECT account_type FROM accounts
+                            WHERE name = ? AND user_id = ?
+                            """,
+                            (name, user_id),
+                        )
+                        account_row = account_cursor.fetchone()
+
+                        if account_row:
+                            account_types[name] = AccountType(
+                                account_row["account_type"]
+                            )
+                        else:
+                            # Default to asset if not found
+                            account_types[name] = AccountType.ASSET
 
             assets = []
             liabilities = []
