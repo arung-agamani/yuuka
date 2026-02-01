@@ -2262,11 +2262,18 @@ class LedgerRepository:
             balances = self.get_user_balance_by_account(user_id)
 
             with self._get_connection() as conn:
-                # Get account types
+                # Get account types from both account_groups and accounts
+                # This ensures we get the correct type for accounts that use groups
                 cursor = conn.execute(
                     """
-                    SELECT name, account_type FROM accounts
-                    WHERE user_id = ?
+                    SELECT DISTINCT
+                        je.account_name as name,
+                        COALESCE(ag.account_type, a.account_type) as account_type
+                    FROM journal_entries je
+                    LEFT JOIN account_groups ag ON je.account_id = ag.id
+                    LEFT JOIN accounts a ON je.account_id = a.id
+                    JOIN transactions t ON je.transaction_id = t.id
+                    WHERE t.user_id = ?
                     """,
                     (user_id,),
                 )
