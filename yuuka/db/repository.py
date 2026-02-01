@@ -158,11 +158,13 @@ class LedgerRepository:
             """)
 
             # Journal entries table - individual debit/credit entries
+            # Note: account_id can reference either accounts(id) OR account_groups(id)
+            # No FOREIGN KEY constraint to allow flexibility
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS journal_entries (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     transaction_id INTEGER NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
-                    account_id INTEGER NOT NULL REFERENCES accounts(id),
+                    account_id INTEGER NOT NULL,
                     account_name TEXT NOT NULL,
                     entry_type TEXT NOT NULL CHECK(entry_type IN ('debit', 'credit')),
                     amount REAL NOT NULL CHECK(amount > 0)
