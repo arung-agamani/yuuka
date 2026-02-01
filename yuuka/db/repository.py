@@ -2339,6 +2339,26 @@ class LedgerRepository:
                             # Default to asset if not found
                             account_types[name] = AccountType.ASSET
 
+            # Aggregate balances by resolved group names
+            # This ensures aliases like "nahida" show as "E-Money"
+            aggregated_balances = {}
+            aggregated_types = {}
+
+            for account_name, balance in balances.items():
+                account_type = account_types.get(account_name, AccountType.ASSET)
+
+                # Try to resolve to group name if it's an alias
+                resolved_group = self.resolve_account_alias(account_name, user_id)
+                display_name = resolved_group.name if resolved_group else account_name
+
+                # Aggregate balances with same display name
+                if display_name not in aggregated_balances:
+                    aggregated_balances[display_name] = 0.0
+                    aggregated_types[display_name] = account_type
+
+                aggregated_balances[display_name] += balance
+
+            # Build balance sheet from aggregated data
             assets = []
             liabilities = []
             equity = []
@@ -2346,17 +2366,17 @@ class LedgerRepository:
             total_liabilities = 0.0
             total_equity = 0.0
 
-            for account_name, balance in balances.items():
-                account_type = account_types.get(account_name, AccountType.ASSET)
+            for display_name, balance in aggregated_balances.items():
+                account_type = aggregated_types[display_name]
 
                 if account_type == AccountType.ASSET:
-                    assets.append({"name": account_name, "amount": balance})
+                    assets.append({"name": display_name, "amount": balance})
                     total_assets += balance
                 elif account_type == AccountType.LIABILITY:
-                    liabilities.append({"name": account_name, "amount": balance})
+                    liabilities.append({"name": display_name, "amount": balance})
                     total_liabilities += balance
                 elif account_type == AccountType.EQUITY:
-                    equity.append({"name": account_name, "amount": balance})
+                    equity.append({"name": display_name, "amount": balance})
                     total_equity += balance
                 # Revenue and Expense accounts contribute to retained earnings
                 elif account_type == AccountType.REVENUE:
