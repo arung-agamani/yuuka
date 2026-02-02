@@ -33,6 +33,10 @@ class BudgetCog(commands.Cog):
         self.budget_repo = budget_repo
         self.recap_service = recap_service
 
+    def _is_dm(self, interaction: discord.Interaction) -> bool:
+        """Check if interaction is in a DM."""
+        return interaction.guild is None
+
     @app_commands.command(name="budget", description="Configure your budget settings")
     @app_commands.describe(
         daily_limit="Your daily spending limit",
@@ -50,27 +54,28 @@ class BudgetCog(commands.Cog):
     ):
         """Configure budget settings for forecasting."""
         try:
+            is_dm = self._is_dm(interaction)
             user_id = str(interaction.user.id)
 
             # Validate inputs
             if daily_limit is not None and daily_limit < 0:
                 await interaction.response.send_message(
                     "❌ Daily limit must be a positive number.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 return
 
             if payday is not None and (payday < 1 or payday > 31):
                 await interaction.response.send_message(
                     "❌ Payday must be between 1 and 31.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 return
 
             if monthly_income is not None and monthly_income < 0:
                 await interaction.response.send_message(
                     "❌ Monthly income must be a positive number.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 return
 
@@ -104,14 +109,14 @@ class BudgetCog(commands.Cog):
                         f"Days until payday: **{config.days_until_payday()}**",
                     ]
                     await interaction.response.send_message(
-                        "\n".join(lines), ephemeral=True
+                        "\n".join(lines), ephemeral=not is_dm
                     )
                     logger.info(f"Showed budget config for user {user_id}")
                 else:
                     await interaction.response.send_message(
                         "📭 No budget configured yet.\n"
                         "Use `/budget daily_limit:<amount> payday:<day>` to set up.",
-                        ephemeral=True,
+                        ephemeral=not is_dm,
                     )
                     logger.debug(f"No budget config found for user {user_id}")
                 return
@@ -132,14 +137,14 @@ class BudgetCog(commands.Cog):
                 f"• Payday: **{config.payday}** (day of month)\n"
                 f"• Daily recap DM: {recap_status}\n"
                 f"• Days until payday: **{config.days_until_payday()}**",
-                ephemeral=True,
+                ephemeral=not is_dm,
             )
             logger.info(f"Updated budget config for user {user_id}")
         except ValueError as e:
             logger.warning(f"Validation error in budget_command: {e}")
             await interaction.response.send_message(
                 f"❌ Invalid input: {str(e)}",
-                ephemeral=True,
+                ephemeral=not self._is_dm(interaction),
             )
         except Exception as e:
             logger.error(f"Error in budget_command: {e}", exc_info=True)
@@ -147,14 +152,19 @@ class BudgetCog(commands.Cog):
                 "❌ An error occurred while updating your budget. Please try again."
             )
             if interaction.response.is_done():
-                await interaction.followup.send(error_msg, ephemeral=True)
+                await interaction.followup.send(
+                    error_msg, ephemeral=not self._is_dm(interaction)
+                )
             else:
-                await interaction.response.send_message(error_msg, ephemeral=True)
+                await interaction.response.send_message(
+                    error_msg, ephemeral=not self._is_dm(interaction)
+                )
 
     @app_commands.command(name="forecast", description="See your financial forecast")
     async def forecast_command(self, interaction: discord.Interaction):
         """Show detailed financial forecast."""
         try:
+            is_dm = self._is_dm(interaction)
             user_id = str(interaction.user.id)
 
             budget = self.budget_repo.get_by_user(user_id)
@@ -162,7 +172,7 @@ class BudgetCog(commands.Cog):
                 await interaction.response.send_message(
                     "📭 No budget configured. Use `/budget` to set up your daily limit "
                     "and payday first.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 logger.debug(
                     f"No budget config for forecast request from user {user_id}"
@@ -222,13 +232,15 @@ class BudgetCog(commands.Cog):
                 buffer = forecast.projected_balance_at_payday
                 lines.append(f"You'll have **{buffer:,.0f}** remaining.")
 
-            await interaction.response.send_message("\n".join(lines), ephemeral=True)
+            await interaction.response.send_message(
+                "\n".join(lines), ephemeral=not is_dm
+            )
             logger.info(f"Showed forecast for user {user_id}: {forecast.warning_level}")
         except ValueError as e:
             logger.warning(f"Validation error in forecast_command: {e}")
             await interaction.response.send_message(
                 f"❌ Invalid input: {str(e)}",
-                ephemeral=True,
+                ephemeral=not self._is_dm(interaction),
             )
         except Exception as e:
             logger.error(f"Error in forecast_command: {e}", exc_info=True)
@@ -236,9 +248,13 @@ class BudgetCog(commands.Cog):
                 "❌ An error occurred while generating your forecast. Please try again."
             )
             if interaction.response.is_done():
-                await interaction.followup.send(error_msg, ephemeral=True)
+                await interaction.followup.send(
+                    error_msg, ephemeral=not self._is_dm(interaction)
+                )
             else:
-                await interaction.response.send_message(error_msg, ephemeral=True)
+                await interaction.response.send_message(
+                    error_msg, ephemeral=not self._is_dm(interaction)
+                )
 
 
 async def setup(bot: commands.Bot):

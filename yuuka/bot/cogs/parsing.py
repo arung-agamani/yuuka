@@ -47,6 +47,45 @@ def format_transaction(parsed: ParsedTransaction) -> str:
     return "\n".join(lines)
 
 
+def format_asset_balances(repository: LedgerRepository, user_id: str) -> Optional[str]:
+    """Format asset balances for display after transaction recording."""
+    try:
+        balance_sheet = repository.get_balance_sheet(user_id)
+
+        if not balance_sheet or not balance_sheet.get("assets"):
+            return None
+
+        # Get assets sorted by balance descending
+        assets = sorted(
+            balance_sheet["assets"],
+            key=lambda x: x["amount"],
+            reverse=True,
+        )
+
+        if not assets:
+            return None
+
+        lines = ["", "💰 **Current Balances**", "```"]
+
+        for asset in assets:
+            name = asset["name"][:18] if asset["name"] else "Unknown"
+            amount = asset["amount"]
+            # Format with Rp prefix
+            amount_str = f"Rp {amount:>14,.0f}"
+            lines.append(f"{name:<18} | {amount_str}")
+
+        lines.append("```")
+
+        # Add total
+        total_assets = balance_sheet["total_assets"]
+        lines.append(f"💵 **Total:** Rp {total_assets:,.0f}")
+
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error(f"Error formatting asset balances: {e}", exc_info=True)
+        return None
+
+
 def format_low_confidence_message(parsed: ParsedTransaction) -> str:
     """Format message for low-confidence parses asking for confirmation."""
     return (
@@ -67,6 +106,7 @@ class TransactionView(discord.ui.View):
         channel_id: str,
         message_id: str,
         guild_id: Optional[str] = None,
+        is_dm: bool = False,
     ):
         super().__init__(timeout=60.0)
         self.parsed = parsed
@@ -76,6 +116,7 @@ class TransactionView(discord.ui.View):
         self.channel_id = channel_id
         self.message_id = message_id
         self.guild_id = guild_id
+        self.is_dm = is_dm
         self.confirmed: bool | None = None
 
     @discord.ui.button(label="✓ Correct", style=discord.ButtonStyle.success)
@@ -100,6 +141,12 @@ class TransactionView(discord.ui.View):
                 f"✅ Confirmed! Transaction recorded (ID: `{entry.id}`):\n"
                 f"{format_transaction(self.parsed)}"
             )
+
+            # Add asset balances
+            balances = format_asset_balances(self.repository, self.user_id)
+            if balances:
+                content += balances
+
             await interaction.response.edit_message(content=content, view=None)
             logger.info(f"User {self.user_id} confirmed transaction {entry.id}")
             self.stop()
@@ -150,16 +197,22 @@ class ParsingCog(commands.Cog):
         self.nlp_service = nlp_service
         self.repository = repository
 
+    def _is_dm(self, interaction: discord.Interaction) -> bool:
+        """Check if interaction is in a DM."""
+        return interaction.guild is None
+
     @app_commands.command(name="parse", description="Parse a transaction message")
     @app_commands.describe(message="The transaction message to parse")
     async def parse_command(self, interaction: discord.Interaction, message: str):
         """Slash command to parse a transaction message."""
         try:
+            is_dm = self._is_dm(interaction)
+
             # Validate input
             if not message or not message.strip():
                 await interaction.response.send_message(
                     "❌ Please provide a transaction message to parse.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 return
 
@@ -167,7 +220,7 @@ class ParsingCog(commands.Cog):
             if len(message) > 500:
                 await interaction.response.send_message(
                     "❌ Transaction message is too long (max 500 characters).",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 return
 
@@ -178,7 +231,7 @@ class ParsingCog(commands.Cog):
                     f"❓ I couldn't parse a valid transaction from your message:\n"
                     f"```{message}```\n"
                     "Please make sure to include an amount and source/destination.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 logger.info(
                     f"Invalid transaction parse for user {interaction.user.id}: {message}"
@@ -193,6 +246,7 @@ class ParsingCog(commands.Cog):
                 # Send first to get message ID
                 await interaction.response.send_message(
                     format_low_confidence_message(parsed),
+                    ephemeral=not is_dm,
                 )
                 response = await interaction.original_response()
                 message_id = str(response.id)
@@ -205,6 +259,7 @@ class ParsingCog(commands.Cog):
                     channel_id=channel_id,
                     message_id=message_id,
                     guild_id=guild_id,
+                    is_dm=is_dm,
                 )
                 await interaction.edit_original_response(view=view)
                 logger.info(
@@ -212,7 +267,10 @@ class ParsingCog(commands.Cog):
                 )
             else:
                 # High confidence - save directly
-                await interaction.response.send_message("Processing...")
+                await interaction.response.send_message(
+                    "Processing...",
+                    ephemeral=not is_dm,
+                )
                 response = await interaction.original_response()
                 message_id = str(response.id)
 
@@ -225,26 +283,35 @@ class ParsingCog(commands.Cog):
                     confirmed=True,
                 )
 
-                await interaction.edit_original_response(
-                    content=(
-                        f"✅ Transaction recorded (ID: `{entry.id}`):\n"
-                        f"{format_transaction(parsed)}"
-                    )
+                content = (
+                    f"✅ Transaction recorded (ID: `{entry.id}`):\n"
+                    f"{format_transaction(parsed)}"
                 )
+
+                # Add asset balances
+                balances = format_asset_balances(self.repository, user_id)
+                if balances:
+                    content += balances
+
+                await interaction.edit_original_response(content=content)
                 logger.info(f"Transaction {entry.id} recorded for user {user_id}")
         except ValueError as e:
             logger.warning(f"Validation error in parse_command: {e}")
             await interaction.response.send_message(
                 f"❌ Invalid input: {str(e)}",
-                ephemeral=True,
+                ephemeral=not self._is_dm(interaction),
             )
         except Exception as e:
             logger.error(f"Error in parse_command: {e}", exc_info=True)
             error_msg = "❌ An error occurred while processing your transaction. Please try again."
             if interaction.response.is_done():
-                await interaction.followup.send(error_msg, ephemeral=True)
+                await interaction.followup.send(
+                    error_msg, ephemeral=not self._is_dm(interaction)
+                )
             else:
-                await interaction.response.send_message(error_msg, ephemeral=True)
+                await interaction.response.send_message(
+                    error_msg, ephemeral=not self._is_dm(interaction)
+                )
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -312,6 +379,7 @@ class ParsingCog(commands.Cog):
                     channel_id=channel_id,
                     message_id=message_id,
                     guild_id=guild_id,
+                    is_dm=is_dm,
                 )
                 await message.reply(
                     format_low_confidence_message(parsed),
@@ -331,10 +399,17 @@ class ParsingCog(commands.Cog):
                     confirmed=True,
                 )
 
-                await message.reply(
+                reply_content = (
                     f"✅ Transaction recorded (ID: `{entry.id}`):\n"
                     f"{format_transaction(parsed)}"
                 )
+
+                # Add asset balances
+                balances = format_asset_balances(self.repository, user_id)
+                if balances:
+                    reply_content += balances
+
+                await message.reply(reply_content)
                 logger.info(f"Transaction {entry.id} recorded from user {user_id}")
         except ValueError as e:
             logger.warning(f"Validation error in on_message: {e}")

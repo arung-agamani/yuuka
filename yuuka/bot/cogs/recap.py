@@ -31,13 +31,18 @@ class RecapCog(commands.Cog):
         self.budget_repo = budget_repo
         self.recap_service = recap_service
 
+    def _is_dm(self, interaction: discord.Interaction) -> bool:
+        """Check if interaction is in a DM."""
+        return interaction.guild is None
+
     @app_commands.command(name="recap", description="Get your daily financial recap")
     async def recap_command(self, interaction: discord.Interaction):
         """Generate and send the daily recap with chart."""
         try:
+            is_dm = self._is_dm(interaction)
             user_id = str(interaction.user.id)
 
-            await interaction.response.defer()
+            await interaction.response.defer(ephemeral=not is_dm)
 
             # Generate recap
             try:
@@ -48,7 +53,7 @@ class RecapCog(commands.Cog):
                 )
                 await interaction.followup.send(
                     "❌ Error generating recap. Please try again.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 return
 
@@ -60,7 +65,7 @@ class RecapCog(commands.Cog):
                 await interaction.followup.send(
                     "📭 No transaction data found. "
                     "Start recording transactions to see your recap!",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 logger.debug(f"No recap data for user {user_id}")
                 return
@@ -79,7 +84,7 @@ class RecapCog(commands.Cog):
                 await interaction.followup.send(
                     "❌ Chart generation failed due to memory constraints. "
                     "Try viewing your summary with /summary instead.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 return
             except Exception as e:
@@ -88,7 +93,7 @@ class RecapCog(commands.Cog):
                 )
                 await interaction.followup.send(
                     "❌ Error generating chart. Please try again.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 return
 
@@ -110,7 +115,7 @@ class RecapCog(commands.Cog):
                 logger.error(f"Discord API error sending recap: {e}", exc_info=True)
                 await interaction.followup.send(
                     "❌ Error sending recap. The chart may be too large.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
             finally:
                 # Clean up buffer
@@ -123,9 +128,13 @@ class RecapCog(commands.Cog):
             )
             try:
                 if interaction.response.is_done():
-                    await interaction.followup.send(error_msg, ephemeral=True)
+                    await interaction.followup.send(
+                        error_msg, ephemeral=not self._is_dm(interaction)
+                    )
                 else:
-                    await interaction.response.send_message(error_msg, ephemeral=True)
+                    await interaction.response.send_message(
+                        error_msg, ephemeral=not self._is_dm(interaction)
+                    )
             except Exception:
                 logger.error("Could not send error message to user")
 

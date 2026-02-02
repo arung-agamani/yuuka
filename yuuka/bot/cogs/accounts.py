@@ -371,6 +371,10 @@ class AccountsCog(commands.Cog):
         self.bot = bot
         self.repository = repository
 
+    def _is_dm(self, interaction: discord.Interaction) -> bool:
+        """Check if interaction is in a DM."""
+        return interaction.guild is None
+
     @app_commands.command(
         name="create_account", description="Create a new account group"
     )
@@ -397,6 +401,7 @@ class AccountsCog(commands.Cog):
     ):
         """Create a new account group."""
         try:
+            is_dm = self._is_dm(interaction)
             user_id = str(interaction.user.id)
             acc_type = AccountType(account_type)
 
@@ -412,20 +417,20 @@ class AccountsCog(commands.Cog):
                 f"**{group.name}** ({format_account_type(group.account_type)})\n"
                 f"{group.description or ''}\n\n"
                 f"You can now add aliases using `/add_alias`.",
-                ephemeral=True,
+                ephemeral=not is_dm,
             )
             logger.info(f"User {user_id} created account group '{group.name}'")
 
         except ValueError as e:
             await interaction.response.send_message(
                 f"❌ {str(e)}",
-                ephemeral=True,
+                ephemeral=not self._is_dm(interaction),
             )
         except Exception as e:
             logger.error(f"Error in create_account_command: {e}", exc_info=True)
             await interaction.response.send_message(
                 "❌ An error occurred while creating the account group.",
-                ephemeral=True,
+                ephemeral=not self._is_dm(interaction),
             )
 
     @app_commands.command(
@@ -443,6 +448,7 @@ class AccountsCog(commands.Cog):
     ):
         """Add an alias to an existing account group."""
         try:
+            is_dm = self._is_dm(interaction)
             user_id = str(interaction.user.id)
 
             # Find the account group
@@ -459,7 +465,7 @@ class AccountsCog(commands.Cog):
                 await interaction.response.send_message(
                     f"❌ Account group '{account_name}' not found.\n"
                     f"Use `/account_groups` to see your account groups.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 return
 
@@ -467,7 +473,7 @@ class AccountsCog(commands.Cog):
             if group.id is None:
                 await interaction.response.send_message(
                     "❌ Invalid account group.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 return
 
@@ -482,20 +488,20 @@ class AccountsCog(commands.Cog):
                 f"**'{account_alias.alias}'** → **{group.name}**\n\n"
                 f"Now when you use '{alias}' in transactions, "
                 f"it will be recorded under '{group.name}'.",
-                ephemeral=True,
+                ephemeral=not is_dm,
             )
             logger.info(f"User {user_id} added alias '{alias}' to group '{group.name}'")
 
         except ValueError as e:
             await interaction.response.send_message(
                 f"❌ {str(e)}",
-                ephemeral=True,
+                ephemeral=not self._is_dm(interaction),
             )
         except Exception as e:
             logger.error(f"Error in add_alias_command: {e}", exc_info=True)
             await interaction.response.send_message(
                 "❌ An error occurred while adding the alias.",
-                ephemeral=True,
+                ephemeral=not self._is_dm(interaction),
             )
 
     @app_commands.command(
@@ -511,6 +517,7 @@ class AccountsCog(commands.Cog):
     ):
         """Remove an alias."""
         try:
+            is_dm = self._is_dm(interaction)
             user_id = str(interaction.user.id)
 
             # First check what group this alias maps to
@@ -522,21 +529,94 @@ class AccountsCog(commands.Cog):
                 group_info = f" (was mapped to '{group.name}')" if group else ""
                 await interaction.response.send_message(
                     f"✅ Alias '{alias}' removed{group_info}.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 logger.info(f"User {user_id} removed alias '{alias}'")
             else:
                 await interaction.response.send_message(
                     f"❌ Alias '{alias}' not found.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
 
         except Exception as e:
             logger.error(f"Error in remove_alias_command: {e}", exc_info=True)
             await interaction.response.send_message(
                 "❌ An error occurred while removing the alias.",
-                ephemeral=True,
+                ephemeral=not self._is_dm(interaction),
             )
+
+    async def _show_account_groups(self, interaction: discord.Interaction):
+        """Internal method to show account groups (shared by /account_groups and /accounts)."""
+        is_dm = self._is_dm(interaction)
+        user_id = str(interaction.user.id)
+        groups = self.repository.get_user_account_groups(user_id)
+
+        if not groups:
+            await interaction.response.send_message(
+                "📭 No account groups found.\n\n"
+                "Create one with `/create_account` or record a transaction "
+                "to get started!",
+                ephemeral=not is_dm,
+            )
+            return
+
+        # Group by account type
+        by_type: dict[AccountType, list[AccountGroup]] = {t: [] for t in AccountType}
+        for group in groups:
+            by_type[group.account_type].append(group)
+
+        lines = ["📋 **Your Account Groups**\n"]
+
+        type_order = [
+            AccountType.ASSET,
+            AccountType.LIABILITY,
+            AccountType.EQUITY,
+            AccountType.REVENUE,
+            AccountType.EXPENSE,
+        ]
+
+        for acc_type in type_order:
+            type_groups = by_type[acc_type]
+            if type_groups:
+                lines.append(f"**{format_account_type(acc_type)}**")
+
+                for group in type_groups:
+                    system_marker = " ⚙️" if group.is_system else ""
+                    lines.append(f"  **{group.name}**{system_marker}")
+
+                    # Get aliases for this group
+                    if group.id is not None:
+                        aliases = self.repository.get_aliases_for_group(
+                            group.id, user_id
+                        )
+                    else:
+                        aliases = []
+                    if aliases:
+                        alias_str = ", ".join(f"`{a.alias}`" for a in aliases[:5])
+                        if len(aliases) > 5:
+                            alias_str += f" +{len(aliases) - 5} more"
+                        lines.append(f"    ↳ Aliases: {alias_str}")
+
+                lines.append("")
+
+        # Check for pending (unmapped) account names
+        pending = self.repository.get_pending_account_names(user_id)
+        if pending:
+            lines.append("⚠️ **Unmapped Account Names**")
+            lines.append("These names are used but not assigned to any group:")
+            for name in pending[:10]:
+                lines.append(f"  • `{name}`")
+            if len(pending) > 10:
+                lines.append(f"  ... and {len(pending) - 10} more")
+            lines.append("")
+            lines.append("Use `/assign_account` to map them to groups.")
+
+        message = "\n".join(lines)
+        if len(message) > 2000:
+            message = message[:1997] + "..."
+
+        await interaction.response.send_message(message, ephemeral=not is_dm)
+        logger.info(f"Showed {len(groups)} account groups for user {user_id}")
 
     @app_commands.command(
         name="account_groups", description="View your account groups and their aliases"
@@ -544,83 +624,27 @@ class AccountsCog(commands.Cog):
     async def account_groups_command(self, interaction: discord.Interaction):
         """Show all account groups and their aliases."""
         try:
-            user_id = str(interaction.user.id)
-            groups = self.repository.get_user_account_groups(user_id)
+            await self._show_account_groups(interaction)
+        except Exception as e:
+            logger.error(f"Error in account_groups_command: {e}", exc_info=True)
+            await interaction.response.send_message(
+                "❌ An error occurred while retrieving your accounts.",
+                ephemeral=not self._is_dm(interaction),
+            )
 
-            if not groups:
-                await interaction.response.send_message(
-                    "📭 No account groups found.\n\n"
-                    "Create one with `/create_account` or record a transaction "
-                    "to get started!",
-                    ephemeral=True,
-                )
-                return
-
-            # Group by account type
-            by_type: dict[AccountType, list[AccountGroup]] = {
-                t: [] for t in AccountType
-            }
-            for group in groups:
-                by_type[group.account_type].append(group)
-
-            lines = ["📋 **Your Account Groups**\n"]
-
-            type_order = [
-                AccountType.ASSET,
-                AccountType.LIABILITY,
-                AccountType.EQUITY,
-                AccountType.REVENUE,
-                AccountType.EXPENSE,
-            ]
-
-            for acc_type in type_order:
-                type_groups = by_type[acc_type]
-                if type_groups:
-                    lines.append(f"**{format_account_type(acc_type)}**")
-
-                    for group in type_groups:
-                        system_marker = " ⚙️" if group.is_system else ""
-                        lines.append(f"  **{group.name}**{system_marker}")
-
-                        # Get aliases for this group
-                        if group.id is not None:
-                            aliases = self.repository.get_aliases_for_group(
-                                group.id, user_id
-                            )
-                        else:
-                            aliases = []
-                        if aliases:
-                            alias_str = ", ".join(f"`{a.alias}`" for a in aliases[:5])
-                            if len(aliases) > 5:
-                                alias_str += f" +{len(aliases) - 5} more"
-                            lines.append(f"    ↳ Aliases: {alias_str}")
-
-                    lines.append("")
-
-            # Check for pending (unmapped) account names
-            pending = self.repository.get_pending_account_names(user_id)
-            if pending:
-                lines.append("⚠️ **Unmapped Account Names**")
-                lines.append("These names are used but not assigned to any group:")
-                for name in pending[:10]:
-                    lines.append(f"  • `{name}`")
-                if len(pending) > 10:
-                    lines.append(f"  ... and {len(pending) - 10} more")
-                lines.append("")
-                lines.append("Use `/assign_account` to map them to groups.")
-
-            message = "\n".join(lines)
-            if len(message) > 2000:
-                message = message[:1997] + "..."
-
-            await interaction.response.send_message(message, ephemeral=True)
-            logger.info(f"Showed {len(groups)} account groups for user {user_id}")
-
+    @app_commands.command(
+        name="accounts",
+        description="View your account groups (alias for /account_groups)",
+    )
+    async def accounts_command(self, interaction: discord.Interaction):
+        """Alias for account_groups command."""
+        try:
+            await self._show_account_groups(interaction)
         except Exception as e:
             logger.error(f"Error in accounts_command: {e}", exc_info=True)
             await interaction.response.send_message(
                 "❌ An error occurred while retrieving your accounts.",
-                ephemeral=True,
+                ephemeral=not self._is_dm(interaction),
             )
 
     @app_commands.command(
@@ -636,6 +660,7 @@ class AccountsCog(commands.Cog):
     ):
         """Assign an unmapped account name to an account group."""
         try:
+            is_dm = self._is_dm(interaction)
             user_id = str(interaction.user.id)
 
             # Check if already mapped
@@ -643,7 +668,7 @@ class AccountsCog(commands.Cog):
             if existing:
                 await interaction.response.send_message(
                     f"ℹ️ '{account_name}' is already mapped to **{existing.name}**.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 return
 
@@ -654,7 +679,7 @@ class AccountsCog(commands.Cog):
                 await interaction.response.send_message(
                     "📭 No account groups found. Please create one first using "
                     "`/create_account`.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 return
 
@@ -673,14 +698,14 @@ class AccountsCog(commands.Cog):
                 f"Inferred type: {format_account_type(inferred_type)}\n\n"
                 f"Choose how to handle this account name:",
                 view=view,
-                ephemeral=True,
+                ephemeral=not is_dm,
             )
 
         except Exception as e:
             logger.error(f"Error in assign_account_command: {e}", exc_info=True)
             await interaction.response.send_message(
                 "❌ An error occurred.",
-                ephemeral=True,
+                ephemeral=not self._is_dm(interaction),
             )
 
     @app_commands.command(
@@ -696,6 +721,7 @@ class AccountsCog(commands.Cog):
     ):
         """Look up which group an account name maps to."""
         try:
+            is_dm = self._is_dm(interaction)
             user_id = str(interaction.user.id)
 
             group = self.repository.resolve_account_alias(account_name.strip(), user_id)
@@ -713,7 +739,7 @@ class AccountsCog(commands.Cog):
                     f"Type: {format_account_type(group.account_type)}\n"
                     f"Description: {group.description or 'None'}\n"
                     f"All aliases: {alias_list}",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
             else:
                 inferred_type = self.repository.infer_account_type(account_name)
@@ -721,14 +747,14 @@ class AccountsCog(commands.Cog):
                     f"❓ **'{account_name}'** is not mapped to any account group.\n\n"
                     f"Inferred type: {format_account_type(inferred_type)}\n\n"
                     f"Use `/assign_account {account_name}` to map it.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
 
         except Exception as e:
             logger.error(f"Error in lookup_account_command: {e}", exc_info=True)
             await interaction.response.send_message(
                 "❌ An error occurred.",
-                ephemeral=True,
+                ephemeral=not self._is_dm(interaction),
             )
 
 

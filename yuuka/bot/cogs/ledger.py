@@ -229,6 +229,10 @@ class LedgerCog(commands.Cog):
         self.bot = bot
         self.repository = repository
 
+    def _is_dm(self, interaction: discord.Interaction) -> bool:
+        """Check if interaction is in a DM."""
+        return interaction.guild is None
+
     @app_commands.command(name="history", description="View your transaction history")
     @app_commands.describe(
         limit="Number of entries to show (default: 10, max: 25)",
@@ -270,10 +274,12 @@ class LedgerCog(commands.Cog):
                 action=action_filter,
             )
 
+            is_dm = self._is_dm(interaction)
+
             if not entries:
                 await interaction.response.send_message(
                     "📭 No transactions found. Start by recording some transactions!",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 logger.debug(f"No history found for user {user_id}")
                 return
@@ -292,13 +298,13 @@ class LedgerCog(commands.Cog):
                 message = message[:1997] + "..."
                 logger.warning(f"History message truncated for user {user_id}")
 
-            await interaction.response.send_message(message, ephemeral=True)
+            await interaction.response.send_message(message, ephemeral=not is_dm)
             logger.info(f"Showed {len(entries)} history entries for user {user_id}")
         except ValueError as e:
             logger.warning(f"Validation error in history_command: {e}")
             await interaction.response.send_message(
                 f"❌ Invalid input: {str(e)}",
-                ephemeral=True,
+                ephemeral=not self._is_dm(interaction),
             )
         except Exception as e:
             logger.error(f"Error in history_command: {e}", exc_info=True)
@@ -306,21 +312,26 @@ class LedgerCog(commands.Cog):
                 "❌ An error occurred while retrieving your history. Please try again."
             )
             if interaction.response.is_done():
-                await interaction.followup.send(error_msg, ephemeral=True)
+                await interaction.followup.send(
+                    error_msg, ephemeral=not self._is_dm(interaction)
+                )
             else:
-                await interaction.response.send_message(error_msg, ephemeral=True)
+                await interaction.response.send_message(
+                    error_msg, ephemeral=not self._is_dm(interaction)
+                )
 
     @app_commands.command(name="summary", description="View your ledger summary")
     async def summary_command(self, interaction: discord.Interaction):
         """Show a summary of the user's ledger."""
         try:
+            is_dm = self._is_dm(interaction)
             user_id = str(interaction.user.id)
             summary = self.repository.get_user_summary(user_id)
 
             if summary["total_entries"] == 0:
                 await interaction.response.send_message(
                     "📭 No transactions found. Start by recording some transactions!",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 logger.debug(f"No summary data for user {user_id}")
                 return
@@ -348,7 +359,9 @@ class LedgerCog(commands.Cog):
                 "```",
             ]
 
-            await interaction.response.send_message("\n".join(lines), ephemeral=True)
+            await interaction.response.send_message(
+                "\n".join(lines), ephemeral=not is_dm
+            )
             logger.info(
                 f"Showed summary for user {user_id}: {summary['total_entries']} entries"
             )
@@ -356,7 +369,7 @@ class LedgerCog(commands.Cog):
             logger.warning(f"Validation error in summary_command: {e}")
             await interaction.response.send_message(
                 f"❌ Invalid input: {str(e)}",
-                ephemeral=True,
+                ephemeral=not self._is_dm(interaction),
             )
         except Exception as e:
             logger.error(f"Error in summary_command: {e}", exc_info=True)
@@ -364,14 +377,19 @@ class LedgerCog(commands.Cog):
                 "❌ An error occurred while retrieving your summary. Please try again."
             )
             if interaction.response.is_done():
-                await interaction.followup.send(error_msg, ephemeral=True)
+                await interaction.followup.send(
+                    error_msg, ephemeral=not self._is_dm(interaction)
+                )
             else:
-                await interaction.response.send_message(error_msg, ephemeral=True)
+                await interaction.response.send_message(
+                    error_msg, ephemeral=not self._is_dm(interaction)
+                )
 
     @app_commands.command(name="balance", description="View balances by account")
     async def balance_command(self, interaction: discord.Interaction):
         """Show balance breakdown by ASSET accounts (your pockets/wallets)."""
         try:
+            is_dm = self._is_dm(interaction)
             user_id = str(interaction.user.id)
 
             # Get balance sheet which properly categorizes accounts
@@ -380,7 +398,7 @@ class LedgerCog(commands.Cog):
             if not balance_sheet or not balance_sheet.get("assets"):
                 await interaction.response.send_message(
                     "📭 No asset accounts found. Start by recording some transactions!",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 logger.debug(f"No asset balances found for user {user_id}")
                 return
@@ -395,23 +413,24 @@ class LedgerCog(commands.Cog):
             lines = ["💰 **Your Pockets/Wallets**", "```"]
 
             for asset in assets:
-                name = asset["name"][:22] if asset["name"] else "Unknown"
+                name = asset["name"][:18] if asset["name"] else "Unknown"
                 amount = asset["amount"]
-                emoji = "+" if amount >= 0 else ""
-                lines.append(f"{name:<22} | {emoji}{amount:>12,.0f}")
+                # Format with Rp prefix
+                amount_str = f"Rp {amount:>14,.0f}"
+                lines.append(f"{name:<18} | {amount_str}")
 
             lines.append("```")
 
             # Add total
             total_assets = balance_sheet["total_assets"]
-            lines.append(f"\n💵 **Total Balance:** {total_assets:,.0f}")
+            lines.append(f"\n💵 **Total Balance:** Rp {total_assets:,.0f}")
 
             message = "\n".join(lines)
             if len(message) > 2000:
                 message = message[:1997] + "..."
                 logger.warning(f"Balance message truncated for user {user_id}")
 
-            await interaction.response.send_message(message, ephemeral=True)
+            await interaction.response.send_message(message, ephemeral=not is_dm)
             logger.info(
                 f"Showed balances for {len(assets)} asset accounts for user {user_id}"
             )
@@ -419,7 +438,7 @@ class LedgerCog(commands.Cog):
             logger.warning(f"Validation error in balance_command: {e}")
             await interaction.response.send_message(
                 f"❌ Invalid input: {str(e)}",
-                ephemeral=True,
+                ephemeral=not self._is_dm(interaction),
             )
         except Exception as e:
             logger.error(f"Error in balance_command: {e}", exc_info=True)
@@ -427,60 +446,13 @@ class LedgerCog(commands.Cog):
                 "❌ An error occurred while retrieving your balances. Please try again."
             )
             if interaction.response.is_done():
-                await interaction.followup.send(error_msg, ephemeral=True)
-            else:
-                await interaction.response.send_message(error_msg, ephemeral=True)
-
-    @app_commands.command(name="accounts", description="View your chart of accounts")
-    async def accounts_command(self, interaction: discord.Interaction):
-        """Show all accounts for the user organized by type."""
-        try:
-            user_id = str(interaction.user.id)
-            accounts = self.repository.get_user_accounts(user_id)
-
-            if not accounts:
-                await interaction.response.send_message(
-                    "📭 No accounts found. Accounts are created automatically when you record transactions!",
-                    ephemeral=True,
+                await interaction.followup.send(
+                    error_msg, ephemeral=not self._is_dm(interaction)
                 )
-                return
-
-            # Group by account type
-            by_type: dict[AccountType, list] = {t: [] for t in AccountType}
-            for acc in accounts:
-                by_type[acc.account_type].append(acc)
-
-            lines = ["📋 **Chart of Accounts**\n"]
-
-            type_order = [
-                AccountType.ASSET,
-                AccountType.LIABILITY,
-                AccountType.EQUITY,
-                AccountType.REVENUE,
-                AccountType.EXPENSE,
-            ]
-
-            for acc_type in type_order:
-                acc_list = by_type[acc_type]
-                if acc_list:
-                    lines.append(f"**{format_account_type(acc_type)}**")
-                    for acc in acc_list:
-                        system_marker = " ⚙️" if acc.is_system else ""
-                        lines.append(f"  • {acc.name}{system_marker}")
-                    lines.append("")
-
-            message = "\n".join(lines)
-            if len(message) > 2000:
-                message = message[:1997] + "..."
-
-            await interaction.response.send_message(message, ephemeral=True)
-            logger.info(f"Showed {len(accounts)} accounts for user {user_id}")
-        except Exception as e:
-            logger.error(f"Error in accounts_command: {e}", exc_info=True)
-            await interaction.response.send_message(
-                "❌ An error occurred while retrieving your accounts.",
-                ephemeral=True,
-            )
+            else:
+                await interaction.response.send_message(
+                    error_msg, ephemeral=not self._is_dm(interaction)
+                )
 
     @app_commands.command(
         name="trial_balance", description="View trial balance (debits vs credits)"
@@ -488,13 +460,14 @@ class LedgerCog(commands.Cog):
     async def trial_balance_command(self, interaction: discord.Interaction):
         """Show trial balance to verify debits equal credits."""
         try:
+            is_dm = self._is_dm(interaction)
             user_id = str(interaction.user.id)
             trial_balance = self.repository.get_trial_balance(user_id)
 
             if not trial_balance["accounts"]:
                 await interaction.response.send_message(
                     "📭 No transactions found to generate trial balance.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 return
 
@@ -520,13 +493,15 @@ class LedgerCog(commands.Cog):
                 diff = trial_balance["difference"]
                 lines.append(f"⚠️ **Unbalanced!** Difference: {diff:,.0f}")
 
-            await interaction.response.send_message("\n".join(lines), ephemeral=True)
+            await interaction.response.send_message(
+                "\n".join(lines), ephemeral=not is_dm
+            )
             logger.info(f"Showed trial balance for user {user_id}")
         except Exception as e:
             logger.error(f"Error in trial_balance_command: {e}", exc_info=True)
             await interaction.response.send_message(
                 "❌ An error occurred while generating trial balance.",
-                ephemeral=True,
+                ephemeral=not self._is_dm(interaction),
             )
 
     @app_commands.command(
@@ -535,13 +510,14 @@ class LedgerCog(commands.Cog):
     async def income_statement_command(self, interaction: discord.Interaction):
         """Show income statement with revenue and expenses."""
         try:
+            is_dm = self._is_dm(interaction)
             user_id = str(interaction.user.id)
             income_stmt = self.repository.get_income_statement(user_id)
 
             if not income_stmt["revenue"] and not income_stmt["expenses"]:
                 await interaction.response.send_message(
                     "📭 No income or expense transactions found.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 return
 
@@ -578,13 +554,15 @@ class LedgerCog(commands.Cog):
             lines.append("─" * 35)
             lines.append(f"{emoji} **Net {status}: {net:,.0f}**")
 
-            await interaction.response.send_message("\n".join(lines), ephemeral=True)
+            await interaction.response.send_message(
+                "\n".join(lines), ephemeral=not is_dm
+            )
             logger.info(f"Showed income statement for user {user_id}")
         except Exception as e:
             logger.error(f"Error in income_statement_command: {e}", exc_info=True)
             await interaction.response.send_message(
                 "❌ An error occurred while generating income statement.",
-                ephemeral=True,
+                ephemeral=not self._is_dm(interaction),
             )
 
     @app_commands.command(
@@ -594,6 +572,7 @@ class LedgerCog(commands.Cog):
     async def balance_sheet_command(self, interaction: discord.Interaction):
         """Show balance sheet with assets, liabilities, and equity."""
         try:
+            is_dm = self._is_dm(interaction)
             user_id = str(interaction.user.id)
             balance_sheet = self.repository.get_balance_sheet(user_id)
 
@@ -606,61 +585,65 @@ class LedgerCog(commands.Cog):
             ):
                 await interaction.response.send_message(
                     "📭 No data found to generate balance sheet.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 return
 
-            lines = ["🏦 **Balance Sheet**", ""]
+            lines = ["🏦 **Balance Sheet**", "```"]
 
             # Assets section
-            lines.append("**💰 Assets**")
+            lines.append("💰 Assets")
             if balance_sheet["assets"]:
                 for item in balance_sheet["assets"]:
-                    lines.append(f"  {item['name']:<20} {item['amount']:>12,.0f}")
+                    name = item["name"][:18] if item["name"] else "Unknown"
+                    amount_str = f"Rp {item['amount']:>14,.0f}"
+                    lines.append(f"  {name:<18} {amount_str}")
             else:
-                lines.append("  _(no assets)_")
-            lines.append(
-                f"  **{'Total Assets':<20} {balance_sheet['total_assets']:>12,.0f}**"
-            )
+                lines.append("  (no assets)")
+            total_assets_str = f"Rp {balance_sheet['total_assets']:>14,.0f}"
+            lines.append(f"  {'Total Assets':<18} {total_assets_str}")
             lines.append("")
 
             # Liabilities section
-            lines.append("**📋 Liabilities**")
+            lines.append("📋 Liabilities")
             if balance_sheet["liabilities"]:
                 for item in balance_sheet["liabilities"]:
-                    lines.append(f"  {item['name']:<20} {item['amount']:>12,.0f}")
+                    name = item["name"][:18] if item["name"] else "Unknown"
+                    amount_str = f"Rp {item['amount']:>14,.0f}"
+                    lines.append(f"  {name:<18} {amount_str}")
             else:
-                lines.append("  _(no liabilities)_")
-            lines.append(
-                f"  **{'Total Liabilities':<20} {balance_sheet['total_liabilities']:>12,.0f}**"
-            )
+                lines.append("  (no liabilities)")
+            total_liab_str = f"Rp {balance_sheet['total_liabilities']:>14,.0f}"
+            lines.append(f"  {'Total Liabilities':<18} {total_liab_str}")
             lines.append("")
 
             # Equity section
-            lines.append("**🏛️ Equity (including Retained Earnings)**")
+            lines.append("🏛️ Equity (incl. Retained Earnings)")
             if balance_sheet["equity"]:
                 for item in balance_sheet["equity"]:
-                    lines.append(f"  {item['name']:<20} {item['amount']:>12,.0f}")
-            lines.append(
-                f"  **{'Total Equity':<20} {balance_sheet['total_equity']:>12,.0f}**"
-            )
-            lines.append("")
+                    name = item["name"][:18] if item["name"] else "Unknown"
+                    amount_str = f"Rp {item['amount']:>14,.0f}"
+                    lines.append(f"  {name:<18} {amount_str}")
+            total_equity_str = f"Rp {balance_sheet['total_equity']:>14,.0f}"
+            lines.append(f"  {'Total Equity':<18} {total_equity_str}")
+            lines.append("```")
 
             # Balance check
-            lines.append("─" * 35)
             if balance_sheet["is_balanced"]:
                 lines.append("✅ **Accounting equation balanced!**")
                 lines.append("Assets = Liabilities + Equity")
             else:
                 lines.append("⚠️ **Warning: Equation not balanced**")
 
-            await interaction.response.send_message("\n".join(lines), ephemeral=True)
+            await interaction.response.send_message(
+                "\n".join(lines), ephemeral=not is_dm
+            )
             logger.info(f"Showed balance sheet for user {user_id}")
         except Exception as e:
             logger.error(f"Error in balance_sheet_command: {e}", exc_info=True)
             await interaction.response.send_message(
                 "❌ An error occurred while generating balance sheet.",
-                ephemeral=True,
+                ephemeral=not self._is_dm(interaction),
             )
 
     @app_commands.command(name="edit", description="Edit an existing transaction")
@@ -670,11 +653,13 @@ class LedgerCog(commands.Cog):
         try:
             user_id = str(interaction.user.id)
 
+            is_dm = self._is_dm(interaction)
+
             # Validate entry_id
             if entry_id <= 0:
                 await interaction.response.send_message(
                     "❌ Invalid entry ID. Please provide a positive number.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 return
 
@@ -684,7 +669,7 @@ class LedgerCog(commands.Cog):
             if not entry:
                 await interaction.response.send_message(
                     f"❌ Transaction `#{entry_id}` not found.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 return
 
@@ -692,7 +677,7 @@ class LedgerCog(commands.Cog):
             if entry.user_id != user_id:
                 await interaction.response.send_message(
                     "❌ You can only edit your own transactions.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 logger.warning(
                     f"User {user_id} attempted to edit entry {entry_id} owned by {entry.user_id}"
@@ -717,7 +702,7 @@ class LedgerCog(commands.Cog):
             logger.warning(f"Validation error in edit_command: {e}")
             await interaction.response.send_message(
                 f"❌ Invalid input: {str(e)}",
-                ephemeral=True,
+                ephemeral=not self._is_dm(interaction),
             )
         except Exception as e:
             logger.error(f"Error in edit_command: {e}", exc_info=True)
@@ -725,20 +710,26 @@ class LedgerCog(commands.Cog):
                 "❌ An error occurred while preparing the edit form. Please try again."
             )
             if interaction.response.is_done():
-                await interaction.followup.send(error_msg, ephemeral=True)
+                await interaction.followup.send(
+                    error_msg, ephemeral=not self._is_dm(interaction)
+                )
             else:
-                await interaction.response.send_message(error_msg, ephemeral=True)
+                await interaction.response.send_message(
+                    error_msg, ephemeral=not self._is_dm(interaction)
+                )
 
     @app_commands.command(name="delete", description="Delete a transaction")
     @app_commands.describe(entry_id="The ID of the transaction to delete")
     async def delete_command(self, interaction: discord.Interaction, entry_id: int):
         """Delete a transaction entry and its associated double-entry records."""
         try:
+            is_dm = self._is_dm(interaction)
+
             # Validate entry_id
             if entry_id <= 0:
                 await interaction.response.send_message(
                     "❌ Transaction ID must be a positive number.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 return
 
@@ -750,7 +741,7 @@ class LedgerCog(commands.Cog):
             if not entry:
                 await interaction.response.send_message(
                     f"❌ Transaction `#{entry_id}` not found.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 logger.debug(
                     f"Entry {entry_id} not found for deletion by user {user_id}"
@@ -760,7 +751,7 @@ class LedgerCog(commands.Cog):
             if entry.user_id != user_id:
                 await interaction.response.send_message(
                     "❌ You can only delete your own transactions.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 logger.warning(
                     f"User {user_id} attempted to delete entry {entry_id} owned by {entry.user_id}"
@@ -772,20 +763,20 @@ class LedgerCog(commands.Cog):
             if deleted:
                 await interaction.response.send_message(
                     f"🗑️ Deleted transaction `#{entry_id}` (and associated journal entries):\n{format_entry(entry)}",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 logger.info(f"User {user_id} deleted entry {entry_id}")
             else:
                 await interaction.response.send_message(
                     f"❌ Failed to delete transaction `#{entry_id}`.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 logger.error(f"Failed to delete entry {entry_id} for user {user_id}")
         except ValueError as e:
             logger.warning(f"Validation error in delete_command: {e}")
             await interaction.response.send_message(
                 f"❌ Invalid input: {str(e)}",
-                ephemeral=True,
+                ephemeral=not self._is_dm(interaction),
             )
         except Exception as e:
             logger.error(f"Error in delete_command: {e}", exc_info=True)
@@ -793,9 +784,13 @@ class LedgerCog(commands.Cog):
                 "❌ An error occurred while deleting the transaction. Please try again."
             )
             if interaction.response.is_done():
-                await interaction.followup.send(error_msg, ephemeral=True)
+                await interaction.followup.send(
+                    error_msg, ephemeral=not self._is_dm(interaction)
+                )
             else:
-                await interaction.response.send_message(error_msg, ephemeral=True)
+                await interaction.response.send_message(
+                    error_msg, ephemeral=not self._is_dm(interaction)
+                )
 
 
 async def setup(bot: commands.Bot):

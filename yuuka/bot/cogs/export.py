@@ -31,6 +31,10 @@ class ExportCog(commands.Cog):
         self.repository = repository
         self.export_service = export_service
 
+    def _is_dm(self, interaction: discord.Interaction) -> bool:
+        """Check if interaction is in a DM."""
+        return interaction.guild is None
+
     @app_commands.command(
         name="export", description="Export your ledger data to a file"
     )
@@ -59,15 +63,16 @@ class ExportCog(commands.Cog):
     ):
         """Export ledger data to XLSX or CSV file."""
         try:
+            is_dm = self._is_dm(interaction)
             user_id = str(interaction.user.id)
 
-            await interaction.response.defer(ephemeral=True)
+            await interaction.response.defer(ephemeral=not is_dm)
 
             # Validate format
             if format not in ["xlsx", "csv"]:
                 await interaction.followup.send(
                     "❌ Invalid export format. Please choose 'xlsx' or 'csv'.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 return
 
@@ -94,7 +99,7 @@ class ExportCog(commands.Cog):
                 logger.error(f"Error calculating date range: {e}", exc_info=True)
                 await interaction.followup.send(
                     "❌ Error calculating date range. Please try again.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 return
 
@@ -104,7 +109,7 @@ class ExportCog(commands.Cog):
                 await interaction.followup.send(
                     "📭 No transactions found to export. "
                     "Start recording transactions first!",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 logger.debug(f"No entries to export for user {user_id}")
                 return
@@ -127,14 +132,14 @@ class ExportCog(commands.Cog):
                 )
                 await interaction.followup.send(
                     "❌ Export too large to process. Try a smaller date range.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 return
             except Exception as e:
                 logger.error(f"Error generating export: {e}", exc_info=True)
                 await interaction.followup.send(
                     "❌ Error generating export file. Please try again.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 return
 
@@ -157,7 +162,7 @@ class ExportCog(commands.Cog):
                 await interaction.followup.send(
                     f"📁 Here's your ledger export ({period_text}):",
                     file=file,
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
                 logger.info(
                     f"Exported {entry_count} entries for user {user_id} ({format})"
@@ -166,7 +171,7 @@ class ExportCog(commands.Cog):
                 logger.error(f"Discord API error sending file: {e}", exc_info=True)
                 await interaction.followup.send(
                     "❌ Error uploading file. The export may be too large.",
-                    ephemeral=True,
+                    ephemeral=not is_dm,
                 )
             finally:
                 # Clean up buffer
@@ -175,17 +180,25 @@ class ExportCog(commands.Cog):
             logger.warning(f"Validation error in export_command: {e}")
             error_msg = f"❌ Invalid input: {str(e)}"
             if interaction.response.is_done():
-                await interaction.followup.send(error_msg, ephemeral=True)
+                await interaction.followup.send(
+                    error_msg, ephemeral=not self._is_dm(interaction)
+                )
             else:
-                await interaction.response.send_message(error_msg, ephemeral=True)
+                await interaction.response.send_message(
+                    error_msg, ephemeral=not self._is_dm(interaction)
+                )
         except Exception as e:
             logger.error(f"Error in export_command: {e}", exc_info=True)
             error_msg = "❌ An error occurred while exporting. Please try again."
             try:
                 if interaction.response.is_done():
-                    await interaction.followup.send(error_msg, ephemeral=True)
+                    await interaction.followup.send(
+                        error_msg, ephemeral=not self._is_dm(interaction)
+                    )
                 else:
-                    await interaction.response.send_message(error_msg, ephemeral=True)
+                    await interaction.response.send_message(
+                        error_msg, ephemeral=not self._is_dm(interaction)
+                    )
             except Exception:
                 logger.error("Could not send error message to user")
 
