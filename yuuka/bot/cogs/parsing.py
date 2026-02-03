@@ -55,10 +55,10 @@ def format_asset_balances(repository: LedgerRepository, user_id: str) -> Optiona
         if not balance_sheet or not balance_sheet.get("assets"):
             return None
 
-        # Get assets sorted by balance descending
+        # Get assets sorted by recently used
         assets = sorted(
             balance_sheet["assets"],
-            key=lambda x: x["amount"],
+            key=lambda x: x.get("last_used") or "",
             reverse=True,
         )
 

@@ -820,6 +820,23 @@ class QueryRepository(BaseRepository):
 
                 aggregated_balances[display_name] += balance
 
+            # Get last transaction timestamp for each account
+            last_used_timestamps = {}
+            with self._get_connection() as conn:
+                for display_name in aggregated_balances.keys():
+                    cursor = conn.execute(
+                        """
+                        SELECT MAX(t.created_at) as last_used
+                        FROM journal_entries je
+                        JOIN transactions t ON je.transaction_id = t.id
+                        WHERE je.account_name = ? AND t.user_id = ?
+                        """,
+                        (display_name, user_id),
+                    )
+                    row = cursor.fetchone()
+                    if row and row["last_used"]:
+                        last_used_timestamps[display_name] = row["last_used"]
+
             # Build balance sheet from aggregated data
             assets = []
             liabilities = []
@@ -830,15 +847,34 @@ class QueryRepository(BaseRepository):
 
             for display_name, balance in aggregated_balances.items():
                 account_type = aggregated_types[display_name]
+                last_used = last_used_timestamps.get(display_name)
 
                 if account_type == AccountType.ASSET:
-                    assets.append({"name": display_name, "amount": balance})
+                    assets.append(
+                        {
+                            "name": display_name,
+                            "amount": balance,
+                            "last_used": last_used,
+                        }
+                    )
                     total_assets += balance
                 elif account_type == AccountType.LIABILITY:
-                    liabilities.append({"name": display_name, "amount": balance})
+                    liabilities.append(
+                        {
+                            "name": display_name,
+                            "amount": balance,
+                            "last_used": last_used,
+                        }
+                    )
                     total_liabilities += balance
                 elif account_type == AccountType.EQUITY:
-                    equity.append({"name": display_name, "amount": balance})
+                    equity.append(
+                        {
+                            "name": display_name,
+                            "amount": balance,
+                            "last_used": last_used,
+                        }
+                    )
                     total_equity += balance
                 # Revenue and Expense contribute to retained earnings
                 elif account_type == AccountType.REVENUE:
